@@ -7,6 +7,7 @@ import { GomokuBoard, stoneName } from './Boards';
 export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) {
   const [mine, setMine] = useState<Stone>(() => setup.side === 'random' ? (Math.random() < 0.5 ? 'B' : 'W') : setup.side === 'w' ? 'B' : 'W');
   const [s, setS] = useState(() => newGomoku(setup.size));
+  const [hintIdx, setHintIdx] = useState<number | undefined>();
   const [saved, setSaved] = useState<'idle' | 'ok' | 'fail'>('idle');
   const botTurn = setup.opp === 'bot' && s.turn !== mine && s.status === 'playing';
   const name = stoneName;
@@ -21,7 +22,7 @@ export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) 
   useEffect(() => {
     if (s.status === 'playing' || saved !== 'idle') return;
     const label = s.status === 'draw' ? '무승부' : setup.opp === 'bot' ? (s.winner === mine ? '승리' : '패배') : `${name(s.winner!)} 승`;
-    setSaved(saveRecord({ id: crypto.randomUUID(), game: 'gomoku', mode: setup.opp === 'bot' ? `컴퓨터(${['', '초급', '보통', '어려움'][setup.level]})` : '2인', result: `${label} (${s.size}×${s.size})`, moves: s.moves.length, at: Date.now() }) ? 'ok' : 'fail');
+    setSaved(saveRecord({ id: crypto.randomUUID(), game: 'gomoku', mode: setup.opp === 'bot' ? `컴퓨터(${['', '초급', '보통', '어려움'][setup.level]})` : '2인', result: `${label} (${s.size}×${s.size})`, moves: s.moves.length, at: Date.now(), list: s.moves.map(String) }) ? 'ok' : 'fail');
   }, [s, saved, setup, mine]);
 
   const place = (i: number) => { if (botTurn) return; const n = playGomoku(s, i); if (n) setS(n); };
@@ -33,7 +34,7 @@ export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) 
     <section className="play">
       <div className="boardcol">
         <div className="player"><span>{setup.opp === 'bot' ? `나: ${name(mine)} · 컴퓨터: ${name(mine === 'B' ? 'W' : 'B')}` : '흑 vs 백 (같은 기기)'}</span></div>
-        <GomokuBoard size={s.size} board={s.board} lastIdx={lastIdx} winLine={s.winLine} disabled={botTurn || s.status !== 'playing'} onPlace={place} />
+        <GomokuBoard size={s.size} board={s.board} lastIdx={lastIdx} winLine={s.winLine} disabled={botTurn || s.status !== 'playing'} onPlace={(i) => { setHintIdx(undefined); place(i); }} hint={hintIdx} />
       </div>
       <aside className="side">
         <p className="status" role="status" aria-live="polite">{status}</p>
@@ -41,6 +42,7 @@ export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) 
         <p>착수 {s.moves.length}수</p>
         <div className="row">
           <button onClick={undo} disabled={s.status !== 'playing' || s.moves.length === 0 || botTurn}>되돌리기</button>
+          {setup.opp === 'bot' && <button onClick={() => { const m = gomokuBot(s, 3); setHintIdx(m); }} disabled={s.status !== 'playing' || botTurn}>힌트</button>}
           <button onClick={restart}>재시작</button>
           <button onClick={exit}>나가기</button>
         </div>

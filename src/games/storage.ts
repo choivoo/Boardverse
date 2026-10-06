@@ -1,4 +1,4 @@
-export interface GameRecord { id: string; game: 'chess' | 'gomoku'; mode: string; result: string; moves: number; at: number }
+export interface GameRecord { id: string; game: 'chess' | 'gomoku'; mode: string; result: string; moves: number; at: number; list?: string[] }
 const KEY = 'boardverse.v1.history';
 
 export function loadHistory(): GameRecord[] {

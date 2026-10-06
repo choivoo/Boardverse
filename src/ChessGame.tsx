@@ -17,6 +17,7 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
   const [clocks, setClocks] = useState({ w: tc.baseSec * 1000, b: tc.baseSec * 1000 });
   const [timeout, setTimeoutLoser] = useState<Color | null>(null);
   const [resigned, setResigned] = useState<Color | null>(null);
+  const [hint, setHint] = useState<{ sq: Square; san: string } | null>(null);
   const [saved, setSaved] = useState<'idle' | 'ok' | 'fail'>('idle');
   const last = useRef(Date.now());
   const flip = setup.opp === 'bot' ? mine === 'b' : false;
@@ -47,7 +48,7 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
     const m = tryMove(game, from, to, promotion);
     if (!m) return false;
     if (tc.incSec) setClocks((c) => ({ ...c, [side]: c[side] + tc.incSec * 1000 }));
-    setSel(null); setPromo(null); force((n) => n + 1);
+    setSel(null); setPromo(null); setHint(null); force((n) => n + 1);
     setGame(game); // same instance, force re-render below via key
     return true;
   };
@@ -67,7 +68,7 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
   useEffect(() => {
     if (!result || saved !== 'idle') return;
     const label = result.result === 'draw' ? '무승부' : setup.opp === 'bot' ? (result.result === mine ? '승리' : '패배') : result.result === 'w' ? '백 승' : '흑 승';
-    setSaved(saveRecord({ id: crypto.randomUUID(), game: 'chess', mode: setup.opp === 'bot' ? `컴퓨터(${['', '초급', '보통', '어려움'][setup.level]})` : '2인', result: `${label} (${result.reason})`, moves: game.history().length, at: Date.now() }) ? 'ok' : 'fail');
+    setSaved(saveRecord({ id: crypto.randomUUID(), game: 'chess', mode: setup.opp === 'bot' ? `컴퓨터(${['', '초급', '보통', '어려움'][setup.level]})` : '2인', result: `${label} (${result.reason})`, moves: game.history().length, at: Date.now(), list: game.history() }) ? 'ok' : 'fail');
   }, [result, saved, setup, mine, game]);
 
   const targets = useMemo(() => (sel ? legalTargets(game, sel) : []), [sel, game, game.fen()]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -102,14 +103,16 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
     <section className="play">
       <div className="boardcol">
         <div className="player"><span>{who(top)}</span>{clockBox(top)}</div>
-        <ChessBoard game={game} flip={flip} sel={sel} targets={targets} last={lastMove} onSquare={click} />
+        <ChessBoard game={game} flip={flip} sel={sel} targets={targets} last={lastMove} onSquare={click} hint={hint?.sq ?? null} />
         <div className="player"><span>{who(bottom)}</span>{clockBox(bottom)}</div>
       </div>
       <aside className="side">
         <p className="status" role="status" aria-live="polite">{status}</p>
+        {hint && <p className="note" role="status">추천 수: {hint.san} (초록 칸의 기물) · 약한 봇의 추천이라 최선이 아닐 수 있어요</p>}
         <ol className="moves" aria-label="수 기록">{Array.from({ length: Math.ceil(hist.length / 2) }, (_, i) => <li key={i}>{hist[2 * i]} {hist[2 * i + 1] ?? ''}</li>)}</ol>
         <div className="row">
           <button onClick={undo} disabled={over || hist.length === 0 || botTurn}>되돌리기</button>
+          {setup.opp === 'bot' && <button onClick={() => { const m = chessBot(game, 3); if (m) setHint({ sq: m.from as Square, san: m.san }); }} disabled={over || botTurn}>힌트</button>}
           <button onClick={() => setResigned(setup.opp === 'bot' ? mine : game.turn())} disabled={over}>기권</button>
           <button onClick={exit}>나가기</button>
         </div>

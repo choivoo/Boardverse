@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { Chess, Move, Square } from 'chess.js';
 import type { GomokuState, Stone } from './games/gomoku';
+import { PieceSvg } from './PieceSvg';
+import { useAccount } from './api';
 
 export const GLYPH: Record<string, string> = { wk: '♔', wq: '♕', wr: '♖', wb: '♗', wn: '♘', wp: '♙', bk: '♚', bq: '♛', br: '♜', bb: '♝', bn: '♞', bp: '♟' };
 export const PNAME: Record<string, string> = { k: '킹', q: '퀸', r: '룩', b: '비숍', n: '나이트', p: '폰' };
@@ -15,9 +17,11 @@ function arrowNav(e: React.KeyboardEvent<HTMLDivElement>, a: string, b: string) 
   (e.currentTarget.querySelector(`[data-${a}="${x + d[e.key][0]}"][data-${b}="${y + d[e.key][1]}"]`) as HTMLElement | null)?.focus();
 }
 
-export function ChessBoard({ game, flip, sel, targets, last, onSquare }: {
-  game: Chess; flip: boolean; sel: Square | null; targets: Move[]; last?: { from: string; to: string } | null; onSquare: (sq: Square) => void;
+export function ChessBoard({ game, flip, sel, targets, last, onSquare, hint }: {
+  game: Chess; flip: boolean; sel: Square | null; targets: Move[]; last?: { from: string; to: string } | null; onSquare: (sq: Square) => void; hint?: Square | null;
 }) {
+  const { look } = useAccount();
+  const glyph = look.chessSet === 'chess-glyph';
   const board = game.board();
   const kingSq = game.isCheck() ? board.flat().find((c) => c && c.type === 'k' && c.color === game.turn())?.square : undefined;
   const order = [...Array(8).keys()]; if (flip) order.reverse();
@@ -26,11 +30,11 @@ export function ChessBoard({ game, flip, sel, targets, last, onSquare }: {
       {order.map((r) => order.map((c) => {
         const p = board[r][c]; const sq = ('abcdefgh'[c] + (8 - r)) as Square;
         const isT = targets.some((m) => m.to === sq);
-        const cls = ['sq', (r + c) % 2 ? 'dark' : 'light', sel === sq && 'sel', isT && 'target', last && (last.from === sq || last.to === sq) && 'last', kingSq === sq && 'check'].filter(Boolean).join(' ');
+        const cls = ['sq', (r + c) % 2 ? 'dark' : 'light', sel === sq && 'sel', isT && 'target', last && (last.from === sq || last.to === sq) && 'last', kingSq === sq && 'check', hint === sq && 'hint-sq'].filter(Boolean).join(' ');
         return (
           <button key={sq} className={cls} data-r={r} data-c={c} role="gridcell" onClick={() => onSquare(sq)}
             aria-label={`${sq}${p ? ` ${p.color === 'w' ? '백' : '흑'} ${PNAME[p.type]}` : ' 빈 칸'}${isT ? ', 이동 가능' : ''}${sel === sq ? ', 선택됨' : ''}`}>
-            {p && <span className={`piece ${p.color}`} aria-hidden="true">{GLYPH[p.color + p.type]}</span>}
+            {p && (glyph ? <span className={`piece ${p.color}`} aria-hidden="true">{GLYPH[p.color + p.type]}</span> : <PieceSvg type={p.type} color={p.color} />)}
             {isT && <span className="dot" aria-hidden="true">{p ? '✕' : '•'}</span>}
           </button>
         );
@@ -42,7 +46,8 @@ export function ChessBoard({ game, flip, sel, targets, last, onSquare }: {
 const coarse = () => { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } };
 
 /** Gomoku board. In "confirm" mode (default on touch screens) a tap previews the stone and a second tap/button confirms. */
-export function GomokuBoard({ size, board, lastIdx, winLine, disabled, onPlace }: {
+export function GomokuBoard({ size, board, lastIdx, winLine, disabled, onPlace, hint }: {
+  hint?: number;
   size: number; board: GomokuState['board']; lastIdx?: number; winLine: number[]; disabled: boolean; onPlace: (i: number) => void;
 }) {
   const [confirm, setConfirm] = useState(coarse);
@@ -59,7 +64,7 @@ export function GomokuBoard({ size, board, lastIdx, winLine, disabled, onPlace }
         {board.map((c, i) => {
           const x = i % size, y = Math.floor(i / size); const win = winLine.includes(i);
           return (
-            <button key={i} role="gridcell" data-x={x} data-y={y} className={`pt ${i === lastIdx ? 'last' : ''} ${win ? 'win' : ''} ${i === pend ? 'pend' : ''}`} onClick={() => tap(i)}
+            <button key={i} role="gridcell" data-x={x} data-y={y} className={`pt ${i === lastIdx ? 'last' : ''} ${win ? 'win' : ''} ${i === pend ? 'pend' : ''} ${i === hint ? 'hint-sq' : ''}`} onClick={() => tap(i)}
               aria-label={`${x + 1}열 ${y + 1}행 ${c ? stoneName(c) + '돌' : '빈 칸'}${i === lastIdx ? ', 마지막 수' : ''}${win ? ', 승리 줄' : ''}${i === pend ? ', 착수 대기' : ''}`}>
               {c && <span className={`stone ${c}`} aria-hidden="true">{win ? '★' : i === lastIdx ? '◦' : ''}</span>}
               {i === pend && <span className="ghost" aria-hidden="true">＋</span>}
