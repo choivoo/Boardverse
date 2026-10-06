@@ -31,3 +31,7 @@ licence obligations reviewed before any public distribution.
 
 ## npm dependencies (runtime)
 - chess.js (BSD-2-Clause), react / react-dom (MIT), ws (MIT), nodemailer (MIT-0).
+
+## Cloudflare tooling (development only)
+- `wrangler` (MIT OR Apache-2.0) / `workerd` (Apache-2.0) are dev dependencies used to run and bundle the Worker; they are not shipped to users.
+- Engine-free builds: `VITE_ENGINE=0` omits all Stockfish files; only this notice file remains in `dist/engine/`.

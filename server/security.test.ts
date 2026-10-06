@@ -41,7 +41,7 @@ describe('sessions, cookies, origin', () => {
     for (const [m, p] of [['POST', '/api/logout'], ['PATCH', '/api/me'], ['DELETE', '/api/me'], ['POST', '/api/shop/buy'], ['POST', '/api/friends/request'], ['POST', '/api/clubs'], ['POST', '/api/report'], ['POST', '/api/password/change'], ['POST', '/api/admin/tournaments']] as const) {
       const res = await raw(p, m, { cookie: u.cookie, origin: 'https://evil.example' }, {}); expect(res.status, `${m} ${p}`).toBe(403);
     }
-    const ws = await new Promise<string>((res) => { const W = require('ws'); const s = new W(`ws://localhost:${h.port}/ws`, { headers: { origin: 'https://evil.example', cookie: u.cookie } }); s.on('open', () => res('open')); s.on('error', () => res('refused')); s.on('unexpected-response', () => res('refused')); });
+    const ws = await new Promise<string>((res) => { const W = require('ws'); const s = new W(`ws://localhost:${h.port}/ws`, { headers: { origin: 'https://evil.example', cookie: u.cookie } }); s.on('open', () => res('open')); s.on('error', () => res('refused')); s.on('unexpected-response', (_q: unknown, r: { statusCode: number }) => res(r.statusCode === 403 ? 'refused' : 'wrong status ' + r.statusCode)); });
     expect(ws).toBe('refused'); // cross-site WebSocket hijacking blocked
   });
 });

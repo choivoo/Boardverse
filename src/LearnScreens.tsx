@@ -7,6 +7,7 @@ import { newGomoku, playGomoku } from './games/gomoku';
 import { api, useAccount } from './api';
 import { GAME_NAME, fmtDate, useLoad } from './ui';
 import { AnalysisPanel } from './AnalysisPanel';
+import { ENGINE_ENABLED } from './analysis/flag';
 import { LABEL_MARK, LABEL_TEXT, type Analysis } from './analysis/analyze';
 import { continuations, lookup, useOpenings } from './openings';
 
@@ -36,7 +37,7 @@ export function LearnHome({ go }: { go: (s: 'puzzles' | 'replay' | 'help' | 'ope
           <p className="note">연속 {p.last === today() || p.last === new Date(Date.now() - 86400_000).toISOString().slice(0, 10) ? p.streak : 0}일 · 이 기기에만 저장됩니다.</p></article>
         <article className="card"><h2>퍼즐 모음</h2><p>체스 {chessPuzzles.length}문제 · 오목 {gomokuPuzzles.length}문제 (직접 생성·검증)</p><button onClick={() => go('puzzles')}>문제 목록</button></article>
         <article className="card"><h2>♞ 오프닝 사전</h2><p>이름 있는 정석 라인을 따라 두며 다음 후보 수를 찾아보세요. (통계 없음 · 출처 CC0)</p><button onClick={() => go('openings')}>열기</button></article>
-        <article className="card"><h2>복기 · PGN · 엔진 분석</h2><p>지난 대국을 한 수씩 돌려보고, 체스는 PGN 내보내기/불러오기와 끝난 대국의 Stockfish 분석(내 기기에서 실행)을 쓸 수 있어요.</p><button onClick={() => go('replay')}>열기</button></article>
+        <article className="card"><h2>{ENGINE_ENABLED ? '복기 · PGN · 엔진 분석' : '복기 · PGN'}</h2><p>지난 대국을 한 수씩 돌려보고, 체스는 PGN 내보내기/불러오기{ENGINE_ENABLED ? '와 끝난 대국의 Stockfish 분석(내 기기에서 실행)' : ''}를 쓸 수 있어요.</p><button onClick={() => go('replay')}>열기</button></article>
         <article className="card"><h2>규칙 · 조작법</h2><p>체스와 오목의 규칙 요약.</p><button onClick={() => go('help')}>도움말</button></article>
       </div>
     </section>
@@ -150,7 +151,7 @@ export function ReplayView({ data, back }: { data: ReplayData; back: () => void 
           {data.moves.map((m, i) => { const pl = analysis?.plies[i]; return (
             <li key={i}>{data.game === 'chess' && i % 2 === 0 ? <span className="mn">{Math.floor(i / 2) + 1}.</span> : null}<button className={`link movebtn ${i + 1 === k ? 'cur' : ''}`} aria-current={i + 1 === k ? 'step' : undefined} onClick={() => setK(i + 1)}>{data.game === 'chess' ? m : `${i + 1}수`}{pl && pl.label !== 'ok' ? <span className={`mk ${pl.label}`} title={LABEL_TEXT[pl.label]} aria-label={LABEL_TEXT[pl.label]}> {LABEL_MARK[pl.label]}</span> : null}</button></li>); })}
         </ol>
-        {data.game === 'chess' && <AnalysisPanel moves={data.moves} k={k} onResult={setAnalysis} />}
+        {data.game === 'chess' && ENGINE_ENABLED && <AnalysisPanel moves={data.moves} k={k} onResult={setAnalysis} />}
         <button onClick={back}>뒤로</button>
       </aside>
     </section>

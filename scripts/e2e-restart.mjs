@@ -1,20 +1,23 @@
 // Restart-recovery E2E: starts its OWN server (file DB in a temp dir, port 8799), plays a game in two browsers,
 // kills the server (SIGTERM) and starts it again on the same DB, and checks both clients resume the same game.
+// TARGET=cf runs the Cloudflare build instead (wrangler dev --local with a persisted Durable Object store) — needs `npm run build` first.
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-const PORT = 8799, URL_ = `http://localhost:${PORT}`, DB = join(mkdtempSync(join(tmpdir(), 'bv-e2e-')), 'e2e.db');
+const PORT = 8799, URL_ = `http://localhost:${PORT}`, DIR = mkdtempSync(join(tmpdir(), 'bv-e2e-')), DB = join(DIR, 'e2e.db'), CF = process.env.TARGET === 'cf';
 let srv;
 const start = async () => {
-  srv = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { env: { ...process.env, PORT: String(PORT), DATABASE_PATH: DB, NODE_NO_WARNINGS: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  srv = CF
+    ? spawn('npx', ['wrangler', 'dev', '--local', '--port', String(PORT), '--persist-to', join(DIR, 'state'), '--var', 'NODE_ENV:development'], { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    : spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { env: { ...process.env, PORT: String(PORT), DATABASE_PATH: DB, NODE_NO_WARNINGS: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; srv.stdout.on('data', (d) => (out += d)); srv.stderr.on('data', (d) => (out += d));
   for (let i = 0; i < 100; i++) { try { if ((await fetch(`${URL_}/healthz`)).ok) return () => out; } catch { /* not up yet */ } await new Promise((r) => setTimeout(r, 200)); }
   throw new Error('server did not start: ' + out);
 };
-const stop = () => new Promise((r) => { srv.once('exit', r); srv.kill('SIGTERM'); });
+const stop = () => new Promise((r) => { srv.once('exit', () => setTimeout(r, CF ? 1500 : 0)); try { CF ? process.kill(-srv.pid, 'SIGTERM') : srv.kill('SIGTERM'); } catch { r(); } });
 const b = await chromium.launch({ executablePath: process.env.CHROMIUM ?? '/opt/pw-browsers/chromium' });
 const vp = { width: 780, height: 700 }; let ok = false;
 try {
@@ -43,11 +46,11 @@ try {
   console.log('ok   offline blip -> auto reconnect');
 
   // ---- server restart in the middle of the game ----
-  await stop(); console.log('     server stopped:', log().includes('SIGTERM') ? 'graceful' : 'unknown');
+  await stop(); console.log('     server stopped:', CF ? 'wrangler/workerd terminated' : log().includes('SIGTERM') ? 'graceful' : 'unknown');
   await A.p.getByText(/연결이 끊겼습니다/).waitFor({ timeout: 20000 });
   log = await start();
   await A.p.getByText(/서버가 재시작되었습니다/).waitFor({ timeout: 40000 }); await B.p.getByText(/서버가 재시작되었습니다/).waitFor({ timeout: 40000 });
-  assert.equal(await A.p.locator('.stone').count(), 2, 'both stones are still on the board after the restart'); assert.ok(log().includes('restored 1 unfinished room'));
+  assert.equal(await A.p.locator('.stone').count(), 2, 'both stones are still on the board after the restart'); assert.ok(log().includes('restored 1 unfinished room'), 'server log says the room was restored');
   await A.p.getByText('내 차례').waitFor(); // black (A) is to move again, same as before the restart
   await tapMove(A, 6, 6); await B.p.getByText('내 차례').waitFor(); assert.equal(await B.p.locator('.stone').count(), 3);
   console.log('ok   server restart -> both clients resumed the same game and can keep playing');

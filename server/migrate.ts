@@ -1,17 +1,15 @@
-import type { DatabaseSync } from 'node:sqlite';
+import type { Db } from './db';
 
 /** Schema version history (PRAGMA user_version). v0/v1 = original schema from the first server release.
  *  v2 = rating categories, tournaments, clubs, email tokens, admin audit, report triage. v3 = persisted rooms + meta.
  *  Migrations are additive and run inside a transaction; old data is preserved (never dropped). */
 export const SCHEMA_VERSION = 3;
-const cols = (db: DatabaseSync, t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
-const addCol = (db: DatabaseSync, t: string, c: string, ddl: string) => { if (!cols(db, t).includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${ddl}`); };
+const cols = (db: Db, t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+const addCol = (db: Db, t: string, c: string, ddl: string) => { if (!cols(db, t).includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${ddl}`); };
 
-export function migrate(db: DatabaseSync) {
-  const v = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-  if (v >= SCHEMA_VERSION) return;
-  db.exec('BEGIN IMMEDIATE');
-  try {
+export function migrate(db: Db) {
+  if (db.getVersion() >= SCHEMA_VERSION) return;
+  db.tx(() => {
     if (!cols(db, 'ratings').includes('cat')) {
       // Old per-game ratings are kept, not copied into the new time categories: chess -> frozen 'legacy', gomoku -> 'std'.
       db.exec(`CREATE TABLE ratings_v2(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, game TEXT NOT NULL, cat TEXT NOT NULL, rating INTEGER NOT NULL, games INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,game,cat));
@@ -36,7 +34,6 @@ export function migrate(db: DatabaseSync) {
     // v3: unfinished online rooms survive a server restart; meta holds the server heartbeat used for the clock policy.
     db.exec(`CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY, data TEXT NOT NULL, updated INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);`);
-    db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
-    db.exec('COMMIT');
-  } catch (e) { db.exec('ROLLBACK'); throw e; }
+    db.setVersion(SCHEMA_VERSION);
+  });
 }

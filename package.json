@@ -13,7 +13,9 @@
     "serve": "npm run build && npm start",
     "predev": "node scripts/copy-engine.mjs",
     "prebuild": "node scripts/copy-engine.mjs",
-    "pretest": "node scripts/copy-engine.mjs"
+    "pretest": "node scripts/copy-engine.mjs",
+    "cf:dev": "npm run build && wrangler dev",
+    "cf:deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "chess.js": "^1.4.0",
@@ -34,6 +36,7 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
   }
 }

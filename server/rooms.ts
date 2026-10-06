@@ -135,6 +135,7 @@ export class RoomManager {
         this.start(room);
         return;
       }
+      case 'ping': return; // keep-alive from the client (idle WebSocket connections can be dropped by proxies)
       case 'queue': return this.enqueue(conn, m, err);
       case 'watch': return this.watch(conn, m.code, err);
       case 'unwatch': this.unwatch(conn); return;

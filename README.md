@@ -7,6 +7,7 @@
 npm install
 npm run serve            # 빌드 후 서버 실행 → http://localhost:8787
 npm run dev              # 클라이언트 개발 서버(5173, /ws는 8787로 프록시) — 다른 터미널에서 npm start 필요
+npm run cf:dev            # Cloudflare 런타임(workerd)으로 로컬 실행: 빌드 후 wrangler dev
 npm test                 # vitest (규칙·스토어·마이그레이션·재시작 복구·보안·메일·엔진·오프닝·HTTP+WebSocket 통합·퍼즐)
 npm run build            # tsc 타입 검사 + vite 빌드
 scripts/dev-server.sh    # E2E용 일회용 서버(:8787, 메모리 DB, 관리자 boss@example.com) → node scripts/e2e.mjs; node scripts/e2e-restart.mjs (Chromium 필요)
@@ -43,6 +44,30 @@ docker run -d -p 8787:8787 -v bv-data:/data -e NODE_ENV=production -e ADMIN_EMAI
 - 24시간이 지난 미완료 방은 복구하지 않고 버립니다. 이미 결과가 기록된 대국은 복구되지 않으며(`alreadyRecorded`), 기록 도중 프로세스가 죽어도 Elo·코인·시즌 집계는 한 번만 반영됩니다.
 - 평가 대국은 재접속 때도 **같은 계정**이어야 합니다. 서버가 `kill -9`로 죽거나 전원이 나가도 마지막 저장 시점(수 단위)부터 복구됩니다. 대기열(빠른 매칭)과 채팅 기록은 저장하지 않습니다.
 
+## Cloudflare 배포 (호스팅 선택: Cloudflare)
+**구조:** 정적 웹앱은 *Workers Static Assets*가 직접 서빙하고(`/api/*`, `/ws`, `/healthz`만 Worker 코드 실행), 백엔드 전체(대국 방 + 계정·레이팅·클럽 등 모든 데이터)는 **Durable Object 1개(`Hub`)** 안에서 실행됩니다. 데이터는 그 객체의 내장 SQLite에 저장되므로 별도 DB·볼륨이 필요 없고, Node 서버와 같은 "단일 인스턴스 + 재시작 복구" 모델입니다(`worker/`, `wrangler.toml`).
+
+**이 환경에서 검증한 것(로컬 `workerd`, 계정 없음):** Cloudflare 빌드에 대해 E2E 17/17, 재시작 E2E(영속된 DO 저장소에서 계정·진행 중 대국 복구), 운영 모드 스모크(`scripts/cf-smoke.mjs`), `wrangler deploy --dry-run`(번들 210KB). **실제 Cloudflare 계정에 배포하지는 않았습니다.**
+
+배포 절차(소유자가 직접):
+1. Cloudflare 계정 생성(무료 가능) → `npx wrangler login` (또는 API 토큰을 `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`로 설정).
+2. 비밀값 등록: `npx wrangler secret put ADMIN_EMAILS` (관리자 이메일, 쉼표 구분), `npx wrangler secret put OPERATOR_TOKEN` (24자 이상 무작위 문자열). **`wrangler.toml`에 넣지 마세요.**
+3. `npm ci && npm run cf:deploy` (엔진 없이 배포하려면 `VITE_ENGINE=0 npm run cf:deploy`). 첫 배포가 Durable Object 마이그레이션(`v1`, SQLite 클래스)을 적용합니다.
+4. 배포 확인: `OPERATOR_TOKEN=… node scripts/cf-smoke.mjs https://boardverse.<계정>.workers.dev`
+5. 관리자 활성화: 관리자 이메일로 가입한 뒤 `curl -X POST https://<도메인>/api/operator/verify-email -H "Authorization: Bearer $OPERATOR_TOKEN" -d '{"email":"you@example.com"}'` (SMTP가 없으므로 이메일 인증 대신 운영자 토큰으로 인증 처리, 감사 로그에 기록됨).
+6. 도메인: Cloudflare에 도메인을 등록한 뒤 대시보드 *Workers & Pages → boardverse → Settings → Domains & Routes*에서 연결(도메인 구매·DNS는 소유자 작업). HTTPS와 `wss://`는 Cloudflare가 처리합니다.
+- GitHub Actions: `.github/workflows/ci.yml`(타입 검사·테스트·빌드·audit·`--dry-run`)과 수동 실행 전용 `deploy-cloudflare.yml`(시크릿 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` 필요). **둘 다 이 환경에서는 실행하지 않았습니다.**
+
+Cloudflare 빌드의 차이·한계:
+- **이메일 인증·비밀번호 재설정은 꺼집니다**(Workers에는 SMTP용 TCP 소켓이 없어 nodemailer를 쓸 수 없음 → UI에 비활성으로 표시). 켜려면 HTTP 방식 메일 서비스를 연결하는 코드가 필요합니다(제공자 미선정). 그동안 관리자 인증은 위 operator 엔드포인트를 씁니다.
+- DO는 전 세계 1곳에서 실행됩니다(첫 요청과 가까운 곳) → 먼 지역 사용자는 지연이 큽니다. 모든 접속이 한 객체를 거치므로 규모에 한계가 있습니다(수백 명 동시 접속은 미측정).
+- WebSocket이 열려 있는 동안 DO가 계속 깨어 있어 **지속 시간 요금**이 발생할 수 있습니다. 요금제·무료 한도는 Cloudflare 문서로 확인하세요(이 저장소는 비용을 측정하지 않았습니다).
+- 코드 배포 시 DO가 재시작되어 접속이 끊기지만, 진행 중 대국은 위 "서버 재시작" 정책대로 복구됩니다. **자동 백업은 구현하지 않았습니다**(사용자별 내보내기만 있음).
+- 서버 이중화·다중 리전 없음. `scripts/verify-user.ts`는 Node 전용이며 Cloudflare에서는 operator 엔드포인트로 대체됩니다.
+
+### 엔진 없이 배포 (GPL 검토 전 안전 옵션)
+`VITE_ENGINE=0 npm run build`(또는 `cf:deploy`)는 Stockfish 파일을 배포물에 넣지 않고 엔진 분석 UI를 숨깁니다. `dist/engine/`에는 `NOTICES.md`만 남습니다. 오프닝 사전·복기·PGN은 그대로 동작합니다.
+
 ## 기능 (구현·검증된 것만)
 - **대국**: 체스(chess.js: 캐슬링·앙파상·승격·체크메이트/스테일메이트·3회 반복·50수·기물 부족, 시계 1/3/5/10분·15+10·무제한), 오목(자체 엔진, 13/15/19, 프리스타일 5목 이상·금수 없음). 컴퓨터 대국(약한 휴리스틱, 브라우저에서 오프라인 실행, 힌트·되돌리기), 같은 기기 2인.
 - **온라인**: 방 코드/링크, 빠른 매칭, 서버가 좌석·차례·합법 수·서버 시계·승패 판정, 중복/오래된 요청 무시, 재접속, 120초 끊김 몰수패, 무승부 제안, 재대결, 친구 초대.
@@ -66,7 +91,7 @@ docker run -d -p 8787:8787 -v bv-data:/data -e NODE_ENV=production -e ADMIN_EMAI
 - 채팅 로그는 파일/DB에 상시 저장하지 않음(방 메모리 최대 50줄, 신고 시에만 20줄 첨부).
 
 ## 알려진 제한 (미구현·미검증)
-- **미배포.** 공개 서비스가 아닙니다. 실제 SMTP로 메일을 보내본 적 없음(전송 계층은 가짜 transport 단위 테스트까지; 개발 모드는 서버 메모리 outbox).
+- **미배포.** 공개 서비스가 아닙니다(Cloudflare 배포 준비·로컬 검증까지 완료, 계정 필요). 실제 SMTP로 메일을 보내본 적 없음(전송 계층은 가짜 transport 단위 테스트까지; 개발 모드는 서버 메모리 outbox).
 - **Stockfish는 GPL-3.0**입니다. 엔진 파일(Lite WASM·JS 두 개만, 패키지 전체가 아님)은 `dist/engine/`로 배포되며 같은 폴더에 `COPYING.txt`(GPL 전문)·`NOTICES.md`·`SOURCE.txt`(패키지 integrity, 파일 SHA-256, 소스 태그 v19.0.0)가 함께 들어가고 도움말 화면에서 링크됩니다. 그래도 이 프로젝트를 공개 배포할 때 GPL 의무(자체 코드 라이선스 포함)가 어떻게 적용되는지는 **법적 검토 전**입니다. 엔진은 Lite 단일 스레드 빌드라 강도가 제한적이고, 분석은 사용자 기기 성능에 좌우됩니다. 컴퓨터 대국 봇은 여전히 약한 휴리스틱이며 힌트도 그 봇이 제안합니다.
 - 오프닝 사전은 이름·수순 사전일 뿐 승률 통계가 아닙니다. 원본은 upstream 커밋 `65bb03f76c7f077984db01a2f2d0534e4181ddfe`로 고정되어 있고(입력 파일 SHA-256이 `src/openingsData.json`에 내장), `node scripts/fetch-openings.mjs <sha> <dir>` → `npx tsx scripts/buildOpenings.ts <dir> <sha> <날짜>`로 바이트 단위 동일하게 재생성됩니다. 배포 빌드는 다운로드가 필요 없습니다.
 - 클럽전·Chess960·렌주 금수·운영자용 사용자 제재(정지) 기능 없음(신고 처리 기록만). 이메일 변경 기능 없음.
@@ -77,6 +102,7 @@ docker run -d -p 8787:8787 -v bv-data:/data -e NODE_ENV=production -e ADMIN_EMAI
 - 퍼즐 진행·최근 기록은 브라우저에만 저장(서버 동기화 없음).
 
 ## 변경 기록
+- 1.0.0-rc5: Cloudflare 호스팅 지원(Worker + Durable Object SQLite, 정적 에셋), 서버 코어를 런타임 비의존으로 분리, DB 추상화, 운영자 인증 엔드포인트, 엔진 없는 빌드 옵션, CI/배포 워크플로, 연결 유지 ping.
 - 1.0.0-rc4 (감사): 오프닝 자료를 upstream 커밋·파일 해시로 고정하고 재생성을 결정적으로 만듦, 엔진 고지·출처 파일을 배포물(dist/engine)에 포함, 복기 오프닝 표기 보정, 테스트 수치 정정(12개 파일 / 96 케이스).
 - 1.0.0-rc3: 진행 중 대국 영속화·재시작 복구(시계 정책 포함), Stockfish 분석(끝난 대국), 오프닝 사전, 메일 설정 검증·실패 처리, 보안 테스트 보강(계정 삭제 시 클럽 인계·내보내기 확대), 서버 ping/클라이언트 offline 감지, Docker non-root.
 - 1.0.0-rc2: DB 마이그레이션, 시간 분류별 레이팅, 이메일 인증·비밀번호 재설정, 관리자 신고 처리·감사 로그, 대회, 클럽, 관전, 채팅, 서버 정상 종료·헬스 체크, Docker 검증, 모바일 헤더 넘침 수정.

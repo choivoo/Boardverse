@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import type { AddressInfo } from 'node:net';
 import { expect } from 'vitest';
 import { createApp, type App } from './app';
-import { Store } from './store';
+import { openStore } from './nodedb';
 import { createMailer } from './mail';
 import type { ClientMsg, ServerMsg, RoomView } from '../src/protocol';
 
@@ -10,7 +10,7 @@ export interface Harness { app: App; base: string; port: number; clock: { t: num
 export async function harness(env: Record<string, string | undefined> = {}, start = Date.parse('2026-11-01T00:00:00Z'), mailer = createMailer({ ADMIN_EMAILS: 'boss@x.com', ...env }), dbPath = ':memory:', clockRef?: { t: number }): Promise<Harness> {
   const clock = clockRef ?? { t: start }; const now = () => clock.t;
   const e = { ADMIN_EMAILS: 'boss@x.com', ...env };
-  const app = createApp(new Store(dbPath, now), { dist: '/nonexistent', now, env: e, mailer });
+  const app = createApp(openStore(dbPath, now), { dist: '/nonexistent', now, env: e, mailer });
   await new Promise<void>((r) => app.server.listen(0, r));
   const port = (app.server.address() as AddressInfo).port;
   return { app, port, base: `http://localhost:${port}`, clock, close: () => app.close() };

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { Store, ApiError, eloDelta, START_RATING, type GameSummary } from './store';
+import { ApiError, eloDelta, START_RATING, type GameSummary } from './store';
+import { openStore } from './nodedb';
 
-const mk = (t = Date.parse('2026-11-01T00:00:00Z')) => { let now = t; const s = new Store(':memory:', () => now); return { s, set: (n: number) => { now = n; } }; };
+const mk = (t = Date.parse('2026-11-01T00:00:00Z')) => { let now = t; const s = openStore(':memory:', () => now); return { s, set: (n: number) => { now = n; } }; };
 const g = (id: string, w: number, b: number, result: 'w' | 'b' | 'draw', over: Partial<GameSummary> = {}): GameSummary =>
   ({ id, game: 'chess', whiteId: w, blackId: b, whiteName: 'W', blackName: 'B', rated: true, time: '5+0', result, reason: 'x', moves: ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5', 'a6'], ...over });
 const fails = (fn: () => unknown, status: number) => { try { fn(); } catch (e) { expect(e).toBeInstanceOf(ApiError); expect((e as ApiError).status).toBe(status); return; } throw new Error('expected failure'); };

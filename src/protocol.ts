@@ -14,7 +14,8 @@ export type ClientMsg =
   | { t: 'join'; code: string; name: string }
   | { t: 'resume'; code: string; token: string }
   | { t: 'move'; n: number; from?: string; to?: string; promotion?: string; idx?: number }
-  | { t: 'resign' };
+  | { t: 'resign' }
+  | { t: 'ping' };
 
 export interface RoomView {
   code: string;

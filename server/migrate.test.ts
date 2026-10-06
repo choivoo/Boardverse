@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from './store';
+import { openStore } from './nodedb';
 import { SCHEMA_VERSION } from './migrate';
 
 // DDL of the first released server version (schema v1) – a real "old" database to migrate.
@@ -23,8 +23,8 @@ describe('schema migration', () => {
   it('upgrades a v1 database in place, keeping every user, rating, game and report', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'bv-')), 'old.db');
     const old = new DatabaseSync(path); old.exec(V1); old.close();
-    const s = new Store(path);
-    expect((s.db.prepare('PRAGMA user_version').get() as any).user_version).toBe(SCHEMA_VERSION);
+    const s = openStore(path);
+    expect(s.db.getVersion()).toBe(SCHEMA_VERSION);
     expect(s.coins(1)).toBe(42);
     expect(s.ratings(1).sort((a, b) => a.game.localeCompare(b.game))).toEqual([{ game: 'chess', cat: 'legacy', rating: 1500, games: 30 }, { game: 'gomoku', cat: 'std', rating: 1300, games: 5 }]);
     expect(s.rating(1, 'chess', 'blitz')).toBe(1200); // old score is NOT copied into new time categories
@@ -33,11 +33,11 @@ describe('schema migration', () => {
     // new games rate into the new category and keep legacy untouched
     s.recordGame({ id: 'n1', game: 'chess', whiteId: 1, blackId: 2, whiteName: 'alice', blackName: 'bobby', rated: true, time: '5+0', result: 'w', reason: 'x', moves: ['a', 'b', 'c', 'd'] });
     expect(s.rating(1, 'chess', 'blitz')).toBe(1220); expect(s.rating(1, 'chess', 'legacy')).toBe(1500);
-    s.db.close();
-    const again = new Store(path); // idempotent re-open
+    s.db.close?.();
+    const again = openStore(path); // idempotent re-open
     expect(again.rating(1, 'chess', 'blitz')).toBe(1220);
   });
   it('a fresh database lands on the same schema version', () => {
-    expect((new Store(':memory:').db.prepare('PRAGMA user_version').get() as any).user_version).toBe(SCHEMA_VERSION);
+    expect(openStore(':memory:').db.getVersion()).toBe(SCHEMA_VERSION);
   });
 });

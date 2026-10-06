@@ -1,9 +1,13 @@
 // Copies ONLY the Stockfish 19 "lite single-thread" build (+ license) from node_modules into public/engine (git-ignored, generated).
 // Runs before dev/build. The engine is GPL-3.0 -> see THIRD_PARTY_NOTICES.md.
-import { copyFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 const src = join('node_modules', 'stockfish'), dst = join('public', 'engine');
+if (process.env.VITE_ENGINE === '0') { // engine-free build: ship only the notices
+  rmSync(dst, { recursive: true, force: true }); mkdirSync(dst, { recursive: true }); copyFileSync('THIRD_PARTY_NOTICES.md', join(dst, 'NOTICES.md'));
+  console.log('engine DISABLED (VITE_ENGINE=0): no Stockfish files are shipped'); process.exit(0);
+}
 if (!existsSync(join(src, 'bin', 'stockfish-19-lite-single.wasm'))) { console.error('stockfish package missing: run npm install'); process.exit(1); }
 const pkg = JSON.parse(readFileSync(join(src, 'package.json'), 'utf8'));
 if (pkg.version !== '19.0.0' || pkg.license !== 'GPL-3.0') { console.error(`unexpected stockfish package ${pkg.version} / ${pkg.license}; review licensing before shipping`); process.exit(1); }

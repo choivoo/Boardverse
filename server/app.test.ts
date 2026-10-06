@@ -2,11 +2,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import type { AddressInfo } from 'node:net';
 import { createApp, type App } from './app';
-import { Store } from './store';
+import { openStore } from './nodedb';
 import type { ClientMsg, ServerMsg, RoomView } from '../src/protocol';
 
 let app: App, base: string, port: number;
-beforeAll(async () => { app = createApp(new Store(':memory:'), { dist: '/nonexistent' }); await new Promise<void>((r) => app.server.listen(0, r)); port = (app.server.address() as AddressInfo).port; base = `http://localhost:${port}`; });
+beforeAll(async () => { app = createApp(openStore(':memory:'), { dist: '/nonexistent' }); await new Promise<void>((r) => app.server.listen(0, r)); port = (app.server.address() as AddressInfo).port; base = `http://localhost:${port}`; });
 afterAll(() => { app.server.close(); });
 
 async function account(name: string) {

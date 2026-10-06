@@ -1,0 +1,31 @@
+# Cloudflare deployment of Boardverse.  See README "Cloudflare 배포".
+name = "boardverse"
+main = "worker/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Static web app (dist/) is served by Cloudflare directly; only these paths run Worker code.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/ws", "/healthz"]
+
+# One Durable Object runs the whole backend (rooms in memory + SQLite storage).
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+# nodemailer cannot run on Workers (no raw SMTP sockets) -> emails stay disabled; see README.
+[alias]
+nodemailer = "./worker/nodemailer-stub.ts"
+
+[vars]
+NODE_ENV = "production"
+# Set these in the Cloudflare dashboard (or `wrangler secret put`), NEVER in this file:
+#   ADMIN_EMAILS     comma separated admin emails (admin also needs a verified email -> use OPERATOR_TOKEN endpoint)
+#   OPERATOR_TOKEN   long random secret (>= 24 chars) enabling POST /api/operator/verify-email

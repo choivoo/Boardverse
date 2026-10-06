@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import type { Db } from './db';
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { DEFAULTS, ITEM_BY_ID, FREE_ITEMS, type Slot } from '../src/catalog';
 import { SEASONS, CLAIM_GRACE_MS, type Season } from '../src/seasons';
@@ -30,9 +30,9 @@ export function eloDelta(ra: number, rb: number, score: number, games: number): 
 type Row = Record<string, any>;
 
 export class Store {
-  db: DatabaseSync;
-  constructor(path = ':memory:', public now: () => number = Date.now) {
-    this.db = new DatabaseSync(path);
+  db: Db;
+  constructor(db: Db, public now: () => number = Date.now) {
+    this.db = db;
     this.db.exec(`
       PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, name_lc TEXT UNIQUE NOT NULL,
@@ -56,7 +56,7 @@ export class Store {
   get(sql: string, ...p: any[]): Row | undefined { return this.db.prepare(sql).get(...p) as Row | undefined; }
   all(sql: string, ...p: any[]): Row[] { return this.db.prepare(sql).all(...p) as Row[]; }
   run(sql: string, ...p: any[]) { return this.db.prepare(sql).run(...p); }
-  tx<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const r = fn(); this.db.exec('COMMIT'); return r; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
+  tx<T>(fn: () => T): T { return this.db.tx(fn); }
 
   // ---- accounts ----
   register(email: string, name: string, password: string): number {
