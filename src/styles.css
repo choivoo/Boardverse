@@ -1,0 +1,39 @@
+:root{--bg:#f4f1ea;--fg:#0e1b2c;--navy:#1f3a5f;--gold:#f2c14e;--card:#fff;--line:#d5cfc2;--light:#ead9b8;--dark:#8a6a4a;--ok:#1b7f4b;--err:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1b2c;--fg:#f4f1ea;--card:#17283f;--line:#34475f}}
+*{box-sizing:border-box}body{margin:0;font:16px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+button{font:inherit;min-height:44px;padding:.4rem 1rem;border-radius:10px;border:2px solid var(--navy);background:var(--card);color:var(--fg);cursor:pointer}
+button.primary{background:var(--navy);color:#fff}button:disabled{opacity:.45;cursor:not-allowed}
+button.link{border:0;background:none;text-decoration:underline;min-height:44px}
+:focus-visible{outline:3px solid var(--gold);outline-offset:2px;box-shadow:0 0 0 5px var(--navy)}
+.skip{position:absolute;left:-999px}.skip:focus{left:8px;top:8px;z-index:9;background:#fff;padding:8px}
+.top{display:flex;justify-content:space-between;align-items:center;padding:.5rem 1rem;border-bottom:1px solid var(--line)}
+.brand{display:flex;gap:.5rem;align-items:center;font-weight:700;font-size:1.2rem;border:0;background:none}
+main{max-width:1000px;margin:0 auto;padding:1rem}main:focus{outline:none}
+.lead{font-size:1.1rem}.cards{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1rem}.card h2{margin-top:0}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem}.note{font-size:.9rem;opacity:.85}.empty{opacity:.8}
+fieldset{border:1px solid var(--line);border-radius:12px;margin:.75rem 0}fieldset label{display:inline-block;margin-right:1rem;min-height:44px;line-height:44px}
+.play{display:grid;gap:1rem;grid-template-columns:minmax(0,1fr)}@media(min-width:800px){.play{grid-template-columns:minmax(0,640px) 1fr}}
+.boardcol{width:min(100%,640px)}.player{display:flex;justify-content:space-between;align-items:center;padding:.25rem 0;font-weight:600}
+.clock{font:700 1.2rem ui-monospace,monospace;padding:.1rem .6rem;border:2px solid var(--line);border-radius:8px}.clock.active{border-color:var(--gold);background:var(--navy);color:#fff}
+.board{display:grid;aspect-ratio:1;width:100%;user-select:none}
+.chess{grid-template-columns:repeat(8,1fr);border:3px solid var(--navy)}
+.sq{position:relative;border:0;border-radius:0;padding:0;min-height:0;display:grid;place-items:center}
+.sq.light{background:var(--light)}.sq.dark{background:var(--dark)}
+.sq.last{box-shadow:inset 0 0 0 100px rgba(242,193,78,.45)}.sq.sel{outline:4px solid var(--navy);outline-offset:-4px}
+.sq.check{box-shadow:inset 0 0 0 4px var(--err)}
+.piece{font-size:min(9vw,56px);line-height:1}.piece.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000,0 0 2px #000}.piece.b{color:#111}
+.dot{position:absolute;color:var(--navy);font-size:1.4rem;font-weight:900;text-shadow:0 0 3px #fff}
+.gomoku{grid-template-columns:repeat(var(--n),1fr);background:#d9b26b;border:3px solid var(--navy)}
+.pt{position:relative;border:0;background:none;border-radius:0;padding:0;min-height:0;display:grid;place-items:center}
+.pt::before,.pt::after{content:"";position:absolute;background:#5a4220}.pt::before{left:0;right:0;top:50%;height:1px}.pt::after{top:0;bottom:0;left:50%;width:1px}
+.pt:hover:not(:has(.stone)){background:rgba(31,58,95,.2)}
+.stone{position:relative;z-index:1;width:82%;aspect-ratio:1;border-radius:50%;display:grid;place-items:center;font-size:.7rem}
+.stone.B{background:#111;color:#f2c14e;box-shadow:0 1px 3px #000}.stone.W{background:#fff;color:#b3261e;border:2px solid #111}
+.pt.last .stone{outline:3px solid var(--gold)}.pt.win .stone{outline:3px solid var(--err)}
+.side{display:flex;flex-direction:column;gap:.5rem}.status{font-size:1.2rem;font-weight:700}
+.moves{max-height:240px;overflow:auto;padding-left:1.5rem;background:var(--card);border-radius:10px;margin:0}
+.dialog{background:var(--card);border:2px solid var(--navy);border-radius:14px;padding:1rem}.dialog button{margin:.2rem}
+.hist{padding-left:1.2rem}
+@media(prefers-reduced-motion:no-preference){button{transition:background .15s}}
+@media(max-width:500px){main{padding:.5rem}}
