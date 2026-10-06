@@ -4,6 +4,7 @@ import { ChessGame } from './ChessGame';
 import { GomokuGame } from './GomokuGame';
 import { TIME_CONTROLS } from './games/chess';
 import { GOMOKU_RULE_LABEL } from './games/gomoku';
+import { OnlineScreen } from './OnlineScreen';
 
 export type Opp = 'local' | 'bot';
 export interface Setup {
@@ -14,14 +15,18 @@ export interface Setup {
   time: string;
   size: number;
 }
-type Screen = { name: 'home' } | { name: 'setup'; game: 'chess' | 'gomoku'; opp: Opp } | { name: 'play'; setup: Setup } | { name: 'help' };
+type Screen = { name: 'home' } | { name: 'setup'; game: 'chess' | 'gomoku'; opp: Opp } | { name: 'play'; setup: Setup } | { name: 'help' } | { name: 'online'; code?: string };
 
 const LEVELS = [{ v: 1, l: '초급' }, { v: 2, l: '보통' }, { v: 3, l: '어려움' }] as const;
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>({ name: 'home' });
+  const [screen, setScreen] = useState<Screen>(() => {
+    const code = new URLSearchParams(location.search).get('room')?.toUpperCase().slice(0, 5);
+    let resume = false; try { resume = !!sessionStorage.getItem('boardverse.v1.session'); } catch { /* ignore */ }
+    return code || resume ? { name: 'online', code } : { name: 'home' };
+  });
   const [round, setRound] = useState(0);
-  const home = () => setScreen({ name: 'home' });
+  const home = () => { setScreen({ name: 'home' }); if (location.search) history.replaceState(null, '', '/'); };
   return (
     <>
       <a className="skip" href="#main">본문으로 건너뛰기</a>
@@ -36,6 +41,7 @@ export function App() {
       <main id="main" tabIndex={-1}>
         {screen.name === 'home' && <Home go={setScreen} />}
         {screen.name === 'setup' && <SetupScreen s={screen} go={setScreen} />}
+        {screen.name === 'online' && <OnlineScreen joinCode={screen.code} exit={home} />}
         {screen.name === 'help' && <Help back={home} />}
         {screen.name === 'play' && (screen.setup.game === 'chess'
           ? <ChessGame key={round} setup={screen.setup} exit={home} again={() => setRound((n) => n + 1)} />
@@ -63,7 +69,12 @@ function Home({ go }: { go: (s: Screen) => void }) {
           </article>
         ))}
       </div>
-      <p className="note">온라인 대국과 계정 로그인은 1.0에 포함되지 않습니다. 게스트로 플레이하며, 전적은 이 브라우저에만 저장됩니다.</p>
+      <article className="card online">
+        <h2>🌐 온라인 대국</h2>
+        <p>방 코드나 링크로 친구와 실시간 대결. 체스 시계와 규칙은 서버가 판정합니다.</p>
+        <button className="primary" onClick={() => go({ name: 'online' })}>온라인으로 하기</button>
+      </article>
+      <p className="note">계정 없이 게스트로 플레이합니다. 전적은 이 브라우저에만 저장됩니다.</p>
       <h2>최근 게임</h2>
       {hist.length === 0 ? <p className="empty">아직 기록된 게임이 없어요. 첫 판을 시작해 보세요!</p> : (
         <>
@@ -80,7 +91,7 @@ function Home({ go }: { go: (s: Screen) => void }) {
 }
 
 function SetupScreen({ s, go }: { s: Extract<Screen, { name: 'setup' }>; go: (s: Screen) => void }) {
-  const [cfg, setCfg] = useState<Setup>({ game: s.game, opp: s.opp, level: 2, side: 'w', time: 'none', size: 15 });
+  const [cfg, setCfg] = useState<Setup>({ game: s.game, opp: s.opp, level: 2, side: 'w', time: 'none', size: innerWidth < 420 ? 13 : 15 });
   const set = <K extends keyof Setup>(k: K, v: Setup[K]) => setCfg((c) => ({ ...c, [k]: v }));
   const chess = s.game === 'chess';
   return (
@@ -125,7 +136,7 @@ function Help({ back }: { back: () => void }) {
       <h2>조작</h2>
       <p>보드는 Tab으로 진입해 방향키로 칸을 이동하고 Enter/Space로 선택합니다. 모바일에서는 칸을 탭하세요.</p>
       <h2>데이터 저장</h2>
-      <p>계정과 서버가 없습니다. 최근 게임 기록(최대 50개)은 이 브라우저의 localStorage에만 저장되며, 홈에서 지울 수 있습니다. 진행 중인 게임은 저장되지 않습니다.</p>
+      <p>온라인 대국은 서버에 방 정보만 잠시 보관하며(접속자가 없으면 30분 후 삭제), 계정은 없습니다. 최근 게임 기록(최대 50개)은 이 브라우저의 localStorage에만 저장되며, 홈에서 지울 수 있습니다. 진행 중인 게임은 저장되지 않습니다.</p>
       <button onClick={back}>홈으로</button>
     </section>
   );

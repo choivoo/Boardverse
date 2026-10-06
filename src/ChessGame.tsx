@@ -3,9 +3,8 @@ import { Chess, type Square } from 'chess.js';
 import type { Setup } from './App';
 import { chessBot, chessEnd, legalTargets, tryMove, TIME_CONTROLS, type Color } from './games/chess';
 import { saveRecord } from './games/storage';
+import { ChessBoard, GLYPH, PNAME as NAME } from './Boards';
 
-const GLYPH: Record<string, string> = { wk: '♔', wq: '♕', wr: '♖', wb: '♗', wn: '♘', wp: '♙', bk: '♚', bq: '♛', br: '♜', bb: '♝', bn: '♞', bp: '♟' };
-const NAME: Record<string, string> = { k: '킹', q: '퀸', r: '룩', b: '비숍', n: '나이트', p: '폰' };
 const fmt = (ms: number) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => void; again: () => void }) {
@@ -73,8 +72,6 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
 
   const targets = useMemo(() => (sel ? legalTargets(game, sel) : []), [sel, game, game.fen()]); // eslint-disable-line react-hooks/exhaustive-deps
   const lastMove = game.history({ verbose: true }).at(-1);
-  const board = game.board();
-  const kingSq = game.isCheck() ? board.flat().find((c) => c && c.type === 'k' && c.color === game.turn())?.square : undefined;
 
   const click = (sq: Square) => {
     if (over || botTurn || promo) return;
@@ -89,25 +86,12 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
     setSel(piece && piece.color === game.turn() ? sq : null);
   };
 
-  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const el = document.activeElement as HTMLElement;
-    const r = Number(el.dataset.r), c = Number(el.dataset.c);
-    if (Number.isNaN(r)) return;
-    const d: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
-    const mv = d[e.key]; if (!mv) return;
-    e.preventDefault();
-    const nr = r + mv[0], nc = c + mv[1];
-    (e.currentTarget.querySelector(`[data-r="${nr}"][data-c="${nc}"]`) as HTMLElement | null)?.focus();
-  };
-
   const undo = () => {
     const n = setup.opp === 'bot' ? (botTurn ? 0 : 2) : 1;
     for (let i = 0; i < n; i++) game.undo();
     setSel(null); setTimeoutLoser(null); force((x) => x + 1);
   };
 
-  const rows = flip ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
-  const cols = flip ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
   const status = result ? '대국 종료' : game.isCheck() ? `체크! ${game.turn() === 'w' ? '백' : '흑'} 차례` : `${game.turn() === 'w' ? '백' : '흑'} 차례${botTurn ? ' (컴퓨터 생각 중…)' : ''}`;
   const hist = game.history();
   const clockBox = (c: Color) => tc.baseSec ? <span className={`clock ${game.turn() === c && !over ? 'active' : ''}`} aria-label={`${c === 'w' ? '백' : '흑'} 남은 시간`}>{fmt(clocks[c])}</span> : null;
@@ -118,20 +102,7 @@ export function ChessGame({ setup, exit, again }: { setup: Setup; exit: () => vo
     <section className="play">
       <div className="boardcol">
         <div className="player"><span>{who(top)}</span>{clockBox(top)}</div>
-        <div className="board chess" role="grid" aria-label="체스판" onKeyDown={onKey}>
-          {rows.map((r) => cols.map((c) => {
-            const p = board[r][c]; const sq = ('abcdefgh'[c] + (8 - r)) as Square;
-            const isT = targets.find((m) => m.to === sq);
-            const cls = ['sq', (r + c) % 2 ? 'dark' : 'light', sel === sq && 'sel', isT && 'target', lastMove && (lastMove.from === sq || lastMove.to === sq) && 'last', kingSq === sq && 'check'].filter(Boolean).join(' ');
-            return (
-              <button key={sq} className={cls} data-r={r} data-c={c} role="gridcell" onClick={() => click(sq)}
-                aria-label={`${sq}${p ? ` ${p.color === 'w' ? '백' : '흑'} ${NAME[p.type]}` : ' 빈 칸'}${isT ? ', 이동 가능' : ''}${sel === sq ? ', 선택됨' : ''}`}>
-                {p && <span className={`piece ${p.color}`} aria-hidden="true">{GLYPH[p.color + p.type]}</span>}
-                {isT && <span className="dot" aria-hidden="true">{p ? '✕' : '•'}</span>}
-              </button>
-            );
-          }))}
-        </div>
+        <ChessBoard game={game} flip={flip} sel={sel} targets={targets} last={lastMove} onSquare={click} />
         <div className="player"><span>{who(bottom)}</span>{clockBox(bottom)}</div>
       </div>
       <aside className="side">

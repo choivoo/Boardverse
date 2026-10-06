@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import type { Setup } from './App';
 import { gomokuBot, newGomoku, playGomoku, undoGomoku, GOMOKU_RULE_LABEL, type Stone } from './games/gomoku';
 import { saveRecord } from './games/storage';
+import { GomokuBoard, stoneName } from './Boards';
 
 export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) {
   const [mine, setMine] = useState<Stone>(() => setup.side === 'random' ? (Math.random() < 0.5 ? 'B' : 'W') : setup.side === 'w' ? 'B' : 'W');
   const [s, setS] = useState(() => newGomoku(setup.size));
   const [saved, setSaved] = useState<'idle' | 'ok' | 'fail'>('idle');
   const botTurn = setup.opp === 'bot' && s.turn !== mine && s.status === 'playing';
-  const name = (c: Stone) => (c === 'B' ? '흑' : '백');
+  const name = stoneName;
   const lastIdx = s.moves.at(-1);
 
   useEffect(() => {
@@ -24,13 +25,6 @@ export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) 
   }, [s, saved, setup, mine]);
 
   const place = (i: number) => { if (botTurn) return; const n = playGomoku(s, i); if (n) setS(n); };
-  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const el = document.activeElement as HTMLElement; const x = Number(el.dataset.x), y = Number(el.dataset.y);
-    const d: Record<string, [number, number]> = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-    if (Number.isNaN(x) || !d[e.key]) return;
-    e.preventDefault();
-    (e.currentTarget.querySelector(`[data-x="${x + d[e.key][0]}"][data-y="${y + d[e.key][1]}"]`) as HTMLElement | null)?.focus();
-  };
   const restart = () => { setS(newGomoku(setup.size)); setSaved('idle'); if (setup.side === 'random') setMine(Math.random() < 0.5 ? 'B' : 'W'); };
   const undo = () => setS(undoGomoku(s, setup.opp === 'bot' ? (botTurn ? 0 : 2) : 1));
   const status = s.status === 'playing' ? `${name(s.turn)} 차례${botTurn ? ' (컴퓨터 생각 중…)' : ''}` : '대국 종료';
@@ -39,18 +33,7 @@ export function GomokuGame({ setup, exit }: { setup: Setup; exit: () => void }) 
     <section className="play">
       <div className="boardcol">
         <div className="player"><span>{setup.opp === 'bot' ? `나: ${name(mine)} · 컴퓨터: ${name(mine === 'B' ? 'W' : 'B')}` : '흑 vs 백 (같은 기기)'}</span></div>
-        <div className="board gomoku" role="grid" aria-label="오목판" style={{ ['--n' as string]: s.size }} onKeyDown={onKey}>
-          {s.board.map((c, i) => {
-            const x = i % s.size, y = Math.floor(i / s.size);
-            const win = s.winLine.includes(i);
-            return (
-              <button key={i} role="gridcell" data-x={x} data-y={y} className={`pt ${i === lastIdx ? 'last' : ''} ${win ? 'win' : ''}`} onClick={() => place(i)}
-                aria-label={`${x + 1}열 ${y + 1}행 ${c ? name(c) + '돌' : '빈 칸'}${i === lastIdx ? ', 마지막 수' : ''}${win ? ', 승리 줄' : ''}`}>
-                {c && <span className={`stone ${c}`} aria-hidden="true">{win ? '★' : i === lastIdx ? '◦' : ''}</span>}
-              </button>
-            );
-          })}
-        </div>
+        <GomokuBoard size={s.size} board={s.board} lastIdx={lastIdx} winLine={s.winLine} disabled={botTurn || s.status !== 'playing'} onPlace={place} />
       </div>
       <aside className="side">
         <p className="status" role="status" aria-live="polite">{status}</p>
