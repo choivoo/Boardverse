@@ -49,7 +49,11 @@ export function OnlineProvider({ enabled, identity, children }: { enabled: boole
       s.onclose = () => { if (closed) return; setConn('closed'); setQueued(false); timer = setTimeout(open, Math.min(1000 * 2 ** retry++, 8000)); };
     };
     open();
-    return () => { closed = true; clearTimeout(timer); ws.current?.close(); };
+    // browser went offline/online: don't wait for TCP timeouts — show the banner at once and reconnect the moment the network is back
+    const onOff = () => { setConn('closed'); setQueued(false); ws.current?.close(); };
+    const onOn = () => { clearTimeout(timer); retry = 0; if (!ws.current || ws.current.readyState > 1) open(); };
+    window.addEventListener('offline', onOff); window.addEventListener('online', onOn);
+    return () => { closed = true; clearTimeout(timer); window.removeEventListener('offline', onOff); window.removeEventListener('online', onOn); ws.current?.close(); };
   }, [enabled, identity]);
 
   const send = useCallback((m: ClientMsg) => {

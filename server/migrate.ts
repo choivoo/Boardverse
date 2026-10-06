@@ -1,9 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 /** Schema version history (PRAGMA user_version). v0/v1 = original schema from the first server release.
- *  v2 = rating categories, tournaments, clubs, email tokens, admin audit, report triage.
+ *  v2 = rating categories, tournaments, clubs, email tokens, admin audit, report triage. v3 = persisted rooms + meta.
  *  Migrations are additive and run inside a transaction; old data is preserved (never dropped). */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 const cols = (db: DatabaseSync, t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
 const addCol = (db: DatabaseSync, t: string, c: string, ddl: string) => { if (!cols(db, t).includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${ddl}`); };
 
@@ -33,6 +33,9 @@ export function migrate(db: DatabaseSync) {
       CREATE TABLE IF NOT EXISTS clubs(id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_lc TEXT UNIQUE NOT NULL, about TEXT NOT NULL DEFAULT '', notice TEXT NOT NULL DEFAULT '', is_public INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS club_members(club_id INTEGER NOT NULL REFERENCES clubs(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(club_id,user_id));
     `);
+    // v3: unfinished online rooms survive a server restart; meta holds the server heartbeat used for the clock policy.
+    db.exec(`CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY, data TEXT NOT NULL, updated INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);`);
     db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }

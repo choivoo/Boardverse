@@ -53,7 +53,7 @@ await run('puzzles: open, wrong answer feedback, PGN import + replay', async () 
   await p.getByRole('button', { name: /1\. 한 수로 승리|1\. 메이트 1수/ }).first().click();
   await p.getByRole('grid').waitFor();
   await p.getByRole('button', { name: '목록' }).click();
-  await tab(p, '학습').click(); await p.getByRole('button', { name: '열기' }).click();
+  await tab(p, '학습').click(); await p.getByRole('button', { name: '열기' }).nth(1).click();
   await p.getByLabel('PGN 붙여넣기').fill('1. e4 e5 2. Nf3 Nc6 3. Bb5 a6'); await p.getByRole('button', { name: '불러오기' }).click();
   await p.getByText('6 / 6수').waitFor(); await p.getByRole('button', { name: '처음으로' }).click(); await p.getByText('0 / 6수').waitFor();
   await p.getByRole('button', { name: '다음 수' }).click(); await p.getByText('1 / 6수').waitFor();
@@ -214,6 +214,56 @@ await run('spectate + chat: live list, read-only view, chat between players, mut
   await first.p.locator('[data-x="0"][data-y="0"]').tap(); await first.p.getByRole('button', { name: '착수', exact: true }).tap();
   await v.p.getByText(/관전 중 ·/).waitFor(); await v.p.locator('.stone').first().waitFor(); await shot(v.p, 'spectator');
   for (const u of [a, b, v]) await u.ctx.close();
+});
+
+
+await run('engine analysis (real Stockfish WASM in a Web Worker) + opening name, finished games only', async () => {
+  const ctx = await mk(VPS.cover); const p = await ctx.newPage(); const errs = []; p.on('pageerror', (e) => errs.push(e.message));
+  await p.goto(URL_); await tab(p, '학습').click(); await p.getByRole('button', { name: '열기' }).nth(1).click();
+  await p.getByLabel('PGN 붙여넣기').fill('1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#'); await p.getByRole('button', { name: '불러오기' }).click();
+  await p.getByText('7 / 7수').waitFor();
+  await p.getByText(/오프닝:/).waitFor(); // dictionary loaded lazily
+  const det = p.locator('details.analysis'); await det.getByText('끝난 대국 전용').waitFor();
+  await det.getByRole('radio', { name: '빠름' }).check(); await det.getByRole('button', { name: '분석 시작' }).click();
+  await det.getByRole('button', { name: '취소' }).waitFor();
+  await det.getByText(/Stockfish 19/).waitFor({ timeout: 60000 });
+  await det.getByText(/깊이 ≤10 · 수당 ≤150ms/).waitFor();
+  await det.getByRole('table', { name: '분석 요약' }).waitFor({ state: 'attached' });
+  assert((await p.locator('.mk.blunder').count()) >= 1, 'a real engine result marks the blunder Nf6'); await shot(p, 'analysis');
+  await p.getByRole('button', { name: '처음으로' }).click(); await p.getByText(/이 위치의 엔진 추천: e4/).waitFor();
+  // cancel really stops the engine
+  await det.getByRole('radio', { name: '정밀' }).check(); await det.getByRole('button', { name: '다시 분석' }).click(); await det.getByRole('button', { name: '취소' }).click(); await det.getByText('분석을 취소했습니다.').waitFor();
+  assert.equal(errs.length, 0, errs.join()); await ctx.close();
+});
+
+await run('opening explorer: names, continuations, transposition-safe, no statistics', async () => {
+  const ctx = await mk(VPS.inner); const p = await ctx.newPage();
+  await p.goto(URL_); await tab(p, '학습').click(); await p.getByRole('button', { name: '열기' }).first().click();
+  await p.getByRole('heading', { name: '오프닝 사전' }).waitFor();
+  await p.getByRole('button', { name: /^e4/ }).click(); await p.getByRole('button', { name: /^e5/ }).click(); await p.getByRole('button', { name: /^Nf3/ }).click(); await p.getByRole('button', { name: /^Nc6/ }).click(); await p.getByRole('button', { name: /^Bb5/ }).click();
+  await p.getByText(/Ruy Lopez/).first().waitFor(); await p.getByText(/승·무·패 통계나 게임 수는 포함하지 않으며/).waitFor();
+  await p.getByRole('button', { name: '한 수 취소' }).click(); await p.getByRole('button', { name: '처음으로' }).click(); await p.getByText('기물을 움직이거나 아래 후보를 눌러 시작하세요.').waitFor();
+  await shot(p, 'openings'); await ctx.close();
+});
+
+await run('a live game never offers engine help; accessibility basics (button names, visible focus)', async () => {
+  const ctx = await mk(VPS.cover); const p = await ctx.newPage();
+  await p.goto(URL_);
+  for (const t of ['홈', '플레이', '학습', '랭킹', '내 정보']) {
+    await tab(p, t).click();
+    const nameless = await p.evaluate(() => [...document.querySelectorAll('button, a[href], input, textarea, select')].filter((e) => { const l = e.getAttribute('aria-label') || e.textContent?.trim() || (e.labels && e.labels[0]?.textContent?.trim()) || e.getAttribute('title') || e.getAttribute('placeholder'); return !l; }).map((e) => e.outerHTML.slice(0, 80)));
+    assert.deepEqual(nameless, [], `${t}: every control has an accessible name`);
+  }
+  await p.getByRole('button', { name: '같은 기기' }).first().click().catch(async () => { await tab(p, '홈').click(); await p.getByRole('button', { name: '같은 기기' }).first().click(); });
+  await p.getByRole('button', { name: '시작' }).click(); await p.getByRole('grid', { name: '체스판' }).waitFor();
+  assert.equal(await p.getByText('엔진 분석').count(), 0, 'no engine analysis during a live game'); assert.equal(await p.locator('details.analysis').count(), 0);
+  assert.equal(await p.evaluate(() => performance.getEntriesByType('resource').some((r) => r.name.includes('/engine/'))), false, 'engine files are not even requested');
+  await p.keyboard.press('Tab'); await p.keyboard.press('Tab'); await p.keyboard.press('Tab');
+  const outline = await p.evaluate(() => { const e = document.activeElement; const c = getComputedStyle(e); return { tag: e.tagName, outline: c.outlineStyle, w: c.outlineWidth }; });
+  assert.notEqual(outline.outline, 'none', 'focused control shows an outline'); await ctx.close();
+  const rm = await b.newContext({ viewport: VPS.cover, reducedMotion: 'reduce', isMobile: true, hasTouch: true }); const q = await rm.newPage(); await q.goto(URL_);
+  assert.equal(await q.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true);
+  assert.equal(await q.evaluate(() => getComputedStyle(document.querySelector('button')).transitionDuration), '0s', 'reduced motion removes transitions'); await rm.close();
 });
 
 await boss?.ctx.close();

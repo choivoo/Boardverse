@@ -10,7 +10,10 @@
     "test": "vitest run",
     "preview": "vite preview",
     "start": "tsx server/index.ts",
-    "serve": "npm run build && npm start"
+    "serve": "npm run build && npm start",
+    "predev": "node scripts/copy-engine.mjs",
+    "prebuild": "node scripts/copy-engine.mjs",
+    "pretest": "node scripts/copy-engine.mjs"
   },
   "dependencies": {
     "chess.js": "^1.4.0",
@@ -27,6 +30,7 @@
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^6.1.2",
     "playwright-core": "^1.63.0",
+    "stockfish": "19.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.3",

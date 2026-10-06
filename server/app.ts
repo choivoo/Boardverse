@@ -12,8 +12,8 @@ import { SEASONS, seasonAt } from '../src/seasons';
 import type { ClientMsg, GameKind } from '../src/protocol';
 import { ACTIVE_CATS, CATS } from '../src/ratingConfig';
 
-const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
-const SEC = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" };
+const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.wasm': 'application/wasm', '.txt': 'text/plain; charset=utf-8', '.json': 'application/json' };
+const SEC = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" };
 const COOKIE = 'bv_session';
 
 export function makeHooks(store: Store, requireVerified = false): Hooks {
@@ -25,6 +25,10 @@ export function makeHooks(store: Store, requireVerified = false): Hooks {
     isFriend: (a, b) => store.isFriend(a, b),
     userByName: (n) => { const u = store.userByName(n); return u ? { id: u.id } : undefined; },
     // Games between two guests are not stored at all (data minimisation).
+    persist: (code, snap) => store.saveRoom(code, JSON.stringify(snap)),
+    drop: (code) => store.dropRoom(code),
+    alreadyRecorded: (id) => store.gameRecorded(id),
+    heartbeat: (now) => store.setMeta('heartbeat', String(now)),
     record: (g) => (g.whiteId === null && g.blackId === null ? null : store.recordGame(g)),
   };
 }
@@ -40,6 +44,8 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
   store.admins = new Set((env.ADMIN_EMAILS ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
   const requireVerified = mailer.enabled && !mailer.dev; // real SMTP configured -> rated play needs a verified email
   const mgr = new RoomManager(opts.now ?? Date.now, makeHooks(store, requireVerified));
+  const restored = mgr.restore(store.loadRooms(), store.getMeta('heartbeat') ? Number(store.getMeta('heartbeat')) : null);
+  if (restored) console.log(`restored ${restored} unfinished room(s)`);
   const rate = new Map<string, number[]>();
   const limit = (key: string, max: number, ms: number) => { const t = Date.now(); const a = (rate.get(key) ?? []).filter((x) => t - x < ms); if (a.length >= max) throw new ApiError(429, '요청이 너무 많습니다. 잠시 후 다시 시도하세요.'); a.push(t); rate.set(key, a); };
   const publicBase = env.PUBLIC_URL ?? '';
@@ -63,6 +69,7 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
     if (method !== 'GET' && !sameOrigin(req)) throw new ApiError(403, '허용되지 않은 출처입니다.');
     const body = method === 'GET' ? {} : await readJson(req);
     const ip = String(req.socket.remoteAddress);
+    limit('api:' + ip, 600, 60_000); // coarse per-IP ceiling for every API call
 
     if (method === 'POST' && (path === '/api/register' || path === '/api/login')) {
       const f = loginFails.get(ip);
@@ -71,7 +78,7 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
       try { id = path === '/api/register' ? store.register(body.email, body.name, body.password) : store.login(body.email, body.password); }
       catch (e) { const c = loginFails.get(ip) ?? { n: 0, until: 0 }; loginFails.set(ip, { n: c.n + 1, until: Date.now() + 10 * 60_000 }); throw e; }
       loginFails.delete(ip);
-      if (path === '/api/register' && mailer.enabled) void sendVerification(id).catch(() => {});
+      if (path === '/api/register' && mailer.enabled) void sendVerification(id).catch(() => { /* logged without secrets; the user can request another mail */ });
       const t = store.createSession(id);
       return send(res, 200, { ok: true }, { 'Set-Cookie': `${COOKIE}=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 86400}${secure ? '; Secure' : ''}` });
     }
@@ -140,7 +147,11 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
       if (!mailer.enabled) throw new ApiError(503, '이 서버에는 이메일 발송이 설정되어 있지 않아 비밀번호 재설정을 사용할 수 없습니다.');
       limit('forgot:' + ip, 10, 3600_000);
       const u = store.userByEmail(body.email);
-      if (u) { try { const t = store.createToken(u.id as number, 'reset', 3600_000); void mailer.send(u.email as string, '[Boardverse] 비밀번호 재설정', `아래 링크에서 1시간 안에 비밀번호를 재설정하세요(한 번만 사용 가능).\n${publicBase}/?reset=${t}\n\n요청하지 않았다면 무시하세요.`).catch(() => {}); } catch { /* swallow: never reveal whether the address exists */ } }
+      if (u) {
+        let t = '';
+        try { t = store.createToken(u.id as number, 'reset', 3600_000); await mailer.send(u.email as string, '[Boardverse] 비밀번호 재설정', `아래 링크에서 1시간 안에 비밀번호를 재설정하세요(한 번만 사용 가능).\n${publicBase}/?reset=${t}\n\n요청하지 않았다면 무시하세요.`); }
+        catch (e) { if (t) store.revokeToken(t); console.error(`reset mail failed: ${(e as Error).message}`); /* swallow: the response must not reveal whether the address exists */ }
+      }
       return send(res, 200, { ok: true }); // identical response whether or not the address is registered
     }
     if (method === 'POST' && path === '/api/password/reset') {
@@ -209,7 +220,8 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
   async function sendVerification(userId: number) {
     const u = store.userRow(userId)!;
     const t = store.createToken(userId, 'verify', 24 * 3600_000);
-    await mailer.send(u.email as string, '[Boardverse] 이메일 인증', `아래 링크를 열어 이메일을 인증하세요(24시간, 한 번만 사용 가능).\n${publicBase}/?verify=${t}`);
+    try { await mailer.send(u.email as string, '[Boardverse] 이메일 인증', `아래 링크를 열어 이메일을 인증하세요(24시간, 한 번만 사용 가능).\n${publicBase}/?verify=${t}`); }
+    catch (e) { store.revokeToken(t); console.error(`verification mail failed: ${(e as Error).message}`); throw new ApiError(502, '메일을 보내지 못했습니다. 잠시 후 다시 시도하세요.'); } // nothing is left behind that could be used or counted
   }
 
   const server = http.createServer(async (req, res) => {
@@ -240,19 +252,23 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
     const u = store.userBySession(parseCookies(req.headers.cookie)[COOKIE]);
     if (u) mgr.attach(conn, u.id, u.name);
     let count = 0; const reset = setInterval(() => { count = 0; }, 1000);
+    // dead-connection detection: ping every 15 s, drop sockets that did not answer the previous ping (so forfeit/disconnect logic stays accurate)
+    let alive = true; ws.on('pong', () => { alive = true; });
+    const beat = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch { /* closing */ } }, 15_000); beat.unref();
     ws.on('message', (data) => {
       if (++count > 20) return;
       let msg: ClientMsg;
       try { msg = JSON.parse(data.toString()); } catch { conn.send({ t: 'error', msg: '잘못된 요청입니다.' }); return; }
       try { mgr.handle(conn, msg); } catch (e) { console.error('handler error', (e as Error).message); conn.send({ t: 'error', msg: '서버 오류가 발생했습니다.' }); }
     });
-    ws.on('close', () => { clearInterval(reset); mgr.disconnect(conn); });
+    ws.on('close', () => { clearInterval(reset); clearInterval(beat); mgr.disconnect(conn); });
     ws.on('error', () => ws.close());
   });
   return {
     server, mgr, store, mailer,
     tick() { mgr.tick(); store.finalizeSeasons(); T.finalizeTournaments(store); },
     async close() {
+      store.setMeta('heartbeat', String((opts.now ?? Date.now)())); // clean shutdown: downtime counts from here
       for (const c of wss.clients) c.close(1001, 'server shutting down');
       wss.close();
       await new Promise<void>((r) => server.close(() => r()));

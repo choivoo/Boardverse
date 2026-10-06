@@ -9,7 +9,7 @@ import { AccountProvider, useAccount } from './api';
 import { OnlineProvider, useOnline, hasSavedRoom } from './online';
 import { AdminScreen, ClubDetail, ClubsScreen, LiveScreen, TournamentDetail, TournamentsScreen } from './Community';
 import { AuthScreen, EmailLinkScreen, ForgotScreen, PasswordScreen, FriendsScreen, LeaderboardScreen, ProfileScreen, PublicProfile, SeasonScreen, ShopScreen } from './AccountScreens';
-import { LearnHome, PuzzleList, PuzzlePlay, ReplayHub, ReplayView, loadProg, type ReplayData } from './LearnScreens';
+import { LearnHome, PuzzleList, PuzzlePlay, OpeningExplorer, ReplayHub, ReplayView, loadProg, type ReplayData } from './LearnScreens';
 import { dailyPuzzle, PUZZLE_TITLE } from './puzzles';
 import { seasonAt } from './seasons';
 import { GAME_NAME } from './ui';
@@ -20,11 +20,11 @@ type Screen =
   | { name: 'home' } | { name: 'play' } | { name: 'setup'; game: 'chess' | 'gomoku'; opp: Opp } | { name: 'game'; setup: Setup }
   | { name: 'online'; code?: string } | { name: 'learn' } | { name: 'puzzles' } | { name: 'puzzle'; id: string }
   | { name: 'replayhub'; serverGame?: string } | { name: 'replay'; data: ReplayData } | { name: 'help' } | { name: 'ranking' }
-  | { name: 'tournaments' } | { name: 'tournament'; id: number } | { name: 'clubs' } | { name: 'club'; id: number } | { name: 'live' } | { name: 'admin' }
+  | { name: 'tournaments' } | { name: 'tournament'; id: number } | { name: 'clubs' } | { name: 'club'; id: number } | { name: 'live' } | { name: 'admin' } | { name: 'openings' }
   | { name: 'password' } | { name: 'forgot' } | { name: 'emaillink'; kind: 'verify' | 'reset'; token: string }
   | { name: 'me' } | { name: 'auth' } | { name: 'shop' } | { name: 'season' } | { name: 'friends' } | { name: 'user'; who: string };
 
-const TAB: Record<string, string> = { home: 'home', play: 'play', setup: 'play', game: 'play', online: 'play', learn: 'learn', puzzles: 'learn', puzzle: 'learn', replayhub: 'learn', replay: 'learn', help: 'learn', ranking: 'ranking', me: 'me', auth: 'me', shop: 'me', season: 'me', friends: 'me', user: 'ranking', tournaments: 'play', tournament: 'play', clubs: 'play', club: 'play', live: 'play', admin: 'me', password: 'me', forgot: 'me', emaillink: 'me' };
+const TAB: Record<string, string> = { home: 'home', play: 'play', setup: 'play', game: 'play', online: 'play', learn: 'learn', puzzles: 'learn', puzzle: 'learn', replayhub: 'learn', replay: 'learn', help: 'learn', ranking: 'ranking', me: 'me', auth: 'me', shop: 'me', season: 'me', friends: 'me', user: 'ranking', openings: 'learn', tournaments: 'play', tournament: 'play', clubs: 'play', club: 'play', live: 'play', admin: 'me', password: 'me', forgot: 'me', emaillink: 'me' };
 const LEVELS = [{ v: 1, l: '초급' }, { v: 2, l: '보통' }, { v: 3, l: '어려움' }] as const;
 const LEVEL_TEXT: Record<'chess' | 'gomoku', Record<number, string>> = {
   chess: { 1: '무작위 합법 수를 둡니다.', 2: '한 수 앞의 기물 득실만 봅니다.', 3: '상대 응수까지 두 수 앞을 봅니다. (강한 엔진이 아닙니다)' },
@@ -80,7 +80,8 @@ function Frame({ screen, go, home, round, again }: { screen: Screen; go: (s: Scr
         {screen.name === 'setup' && <SetupScreen s={screen} go={go} />}
         {screen.name === 'game' && (screen.setup.game === 'chess' ? <ChessGame key={round} setup={screen.setup} exit={home} again={again} /> : <GomokuGame key={round} setup={screen.setup} exit={home} />)}
         {screen.name === 'online' && <OnlineScreen joinCode={screen.code} exit={home} login={toAuth} />}
-        {screen.name === 'learn' && <LearnHome go={(t) => go(t === 'puzzles' ? { name: 'puzzles' } : t === 'replay' ? { name: 'replayhub' } : t === 'help' ? { name: 'help' } : { name: 'puzzle', id: t.puzzle })} />}
+        {screen.name === 'learn' && <LearnHome go={(t) => go(t === 'openings' ? { name: 'openings' } : t === 'puzzles' ? { name: 'puzzles' } : t === 'replay' ? { name: 'replayhub' } : t === 'help' ? { name: 'help' } : { name: 'puzzle', id: t.puzzle })} />}
+        {screen.name === 'openings' && <OpeningExplorer back={() => go({ name: 'learn' })} />}
         {screen.name === 'puzzles' && <PuzzleList open={(id) => go({ name: 'puzzle', id })} />}
         {screen.name === 'puzzle' && <PuzzlePlay id={screen.id} back={() => go({ name: 'puzzles' })} />}
         {screen.name === 'replayhub' && <ReplayHub open={(data) => go({ name: 'replay', data })} serverGameId={screen.serverGame} />}

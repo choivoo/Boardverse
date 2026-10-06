@@ -6,6 +6,9 @@ import { loadHistory } from './games/storage';
 import { newGomoku, playGomoku } from './games/gomoku';
 import { api, useAccount } from './api';
 import { GAME_NAME, fmtDate, useLoad } from './ui';
+import { AnalysisPanel } from './AnalysisPanel';
+import { LABEL_MARK, LABEL_TEXT, type Analysis } from './analysis/analyze';
+import { continuations, lookup, useOpenings } from './openings';
 
 // ---------- puzzle progress (local only) ----------
 const PKEY = 'boardverse.v1.puzzles';
@@ -20,7 +23,7 @@ function markSolved(id: string): Prog {
   return p;
 }
 
-export function LearnHome({ go }: { go: (s: 'puzzles' | 'replay' | 'help' | { puzzle: string }) => void }) {
+export function LearnHome({ go }: { go: (s: 'puzzles' | 'replay' | 'help' | 'openings' | { puzzle: string }) => void }) {
   const [p] = useState(loadProg);
   const d = useMemo(() => dailyPuzzle(), []);
   const done = p.solved.includes(d.p.id);
@@ -32,7 +35,8 @@ export function LearnHome({ go }: { go: (s: 'puzzles' | 'replay' | 'help' | { pu
           <button className="primary" onClick={() => go({ puzzle: d.p.id })}>{done ? '다시 풀기' : '풀기'}</button>
           <p className="note">연속 {p.last === today() || p.last === new Date(Date.now() - 86400_000).toISOString().slice(0, 10) ? p.streak : 0}일 · 이 기기에만 저장됩니다.</p></article>
         <article className="card"><h2>퍼즐 모음</h2><p>체스 {chessPuzzles.length}문제 · 오목 {gomokuPuzzles.length}문제 (직접 생성·검증)</p><button onClick={() => go('puzzles')}>문제 목록</button></article>
-        <article className="card"><h2>복기 · PGN</h2><p>지난 대국을 한 수씩 돌려보고, 체스는 PGN으로 내보내거나 불러올 수 있어요. (엔진 평가는 없는 단순 기보 뷰어입니다)</p><button onClick={() => go('replay')}>열기</button></article>
+        <article className="card"><h2>♞ 오프닝 사전</h2><p>이름 있는 정석 라인을 따라 두며 다음 후보 수를 찾아보세요. (통계 없음 · 출처 CC0)</p><button onClick={() => go('openings')}>열기</button></article>
+        <article className="card"><h2>복기 · PGN · 엔진 분석</h2><p>지난 대국을 한 수씩 돌려보고, 체스는 PGN 내보내기/불러오기와 끝난 대국의 Stockfish 분석(내 기기에서 실행)을 쓸 수 있어요.</p><button onClick={() => go('replay')}>열기</button></article>
         <article className="card"><h2>규칙 · 조작법</h2><p>체스와 오목의 규칙 요약.</p><button onClick={() => go('help')}>도움말</button></article>
       </div>
     </section>
@@ -118,6 +122,7 @@ export interface ReplayData { game: 'chess' | 'gomoku'; moves: string[]; title: 
 
 export function ReplayView({ data, back }: { data: ReplayData; back: () => void }) {
   const [k, setK] = useState(data.moves.length);
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
   useEffect(() => setK(data.moves.length), [data]);
   const chess = useMemo(() => { if (data.game !== 'chess') return null; const g = new Chess(); let last: { from: string; to: string } | null = null; for (const m of data.moves.slice(0, k)) { const r = g.move(m); last = { from: r.from, to: r.to }; } return { g, last }; }, [data, k]);
   const gomoku = useMemo(() => { if (data.game !== 'gomoku') return null; let s = newGomoku(data.size ?? 15); for (const m of data.moves.slice(0, k)) s = playGomoku(s, Number(m)) ?? s; return s; }, [data, k]);
@@ -140,10 +145,22 @@ export function ReplayView({ data, back }: { data: ReplayData; back: () => void 
         <div className="stepper"><button onClick={() => setK(0)} aria-label="처음으로">⏮</button><button onClick={() => setK(Math.max(0, k - 1))} aria-label="이전 수">◀</button><button onClick={() => setK(Math.min(data.moves.length, k + 1))} aria-label="다음 수">▶</button><button onClick={() => setK(data.moves.length)} aria-label="마지막으로">⏭</button></div>
         {data.game === 'chess' && <><label className="field">PGN<textarea readOnly value={pgn} /></label>
           <div className="row"><button onClick={() => navigator.clipboard?.writeText(pgn)}>복사</button><a download="boardverse.pgn" href={`data:application/x-chess-pgn;charset=utf-8,${encodeURIComponent(pgn)}`}><button type="button">파일 저장</button></a></div></>}
+        {data.game === 'chess' && <OpeningLine moves={data.moves.slice(0, k)} />}
+        <ol className="moves chips" aria-label="수 기록 (눌러서 이동)">
+          {data.moves.map((m, i) => { const pl = analysis?.plies[i]; return (
+            <li key={i}>{data.game === 'chess' && i % 2 === 0 ? <span className="mn">{Math.floor(i / 2) + 1}.</span> : null}<button className={`link movebtn ${i + 1 === k ? 'cur' : ''}`} aria-current={i + 1 === k ? 'step' : undefined} onClick={() => setK(i + 1)}>{data.game === 'chess' ? m : `${i + 1}수`}{pl && pl.label !== 'ok' ? <span className={`mk ${pl.label}`} title={LABEL_TEXT[pl.label]} aria-label={LABEL_TEXT[pl.label]}> {LABEL_MARK[pl.label]}</span> : null}</button></li>); })}
+        </ol>
+        {data.game === 'chess' && <AnalysisPanel moves={data.moves} k={k} onResult={setAnalysis} />}
         <button onClick={back}>뒤로</button>
       </aside>
     </section>
   );
+}
+
+function OpeningLine({ moves }: { moves: string[] }) {
+  const data = useOpenings(); const o = data ? lookup(data, moves) : null;
+  if (!data) return <p className="note">오프닝 사전을 불러오는 중…</p>;
+  return <p className="note" role="status">{o ? <>오프닝: <strong>{o.name}</strong> ({o.eco}) · 출처 lichess-org/chess-openings (CC0)</> : '오프닝 이름 없음 (수록된 라인 밖)'}</p>;
 }
 
 export function ReplayHub({ open, serverGameId }: { open: (d: ReplayData) => void; serverGameId?: string }) {
@@ -169,6 +186,39 @@ export function ReplayHub({ open, serverGameId }: { open: (d: ReplayData) => voi
       <label className="field">PGN 붙여넣기<textarea value={pgn} onChange={(e) => setPgn(e.target.value)} placeholder="1. e4 e5 2. Nf3 ..." /></label>
       {err && <p className="banner err" role="alert">{err}</p>}
       <button className="primary" disabled={!pgn.trim()} onClick={importPgn}>불러오기</button>
+    </section>
+  );
+}
+
+// ---------- opening explorer (name dictionary of known lines; no statistics) ----------
+export function OpeningExplorer({ back }: { back: () => void }) {
+  const data = useOpenings(); const [moves, setMoves] = useState<string[]>([]);
+  const [game, setGame] = useState(() => new Chess());
+  const [sel, setSel] = useState<Square | null>(null);
+  const sync = (m: string[]) => { const g = new Chess(); for (const x of m) g.move(x); setGame(g); setMoves(m); setSel(null); };
+  const targets = sel ? game.moves({ square: sel, verbose: true }) : [];
+  const click = (sq: Square) => {
+    const t = targets.find((m) => m.to === sq);
+    if (sel && t) { const g = new Chess(game.fen()); const r = g.move({ from: sel, to: sq, promotion: 'q' }); sync([...moves, r.san]); return; }
+    const p = game.get(sq); setSel(p && p.color === game.turn() ? sq : null);
+  };
+  if (!data) return <section><h1>오프닝 사전</h1><p role="status">불러오는 중…</p></section>;
+  const cur = lookup(data, moves); const next = continuations(data, moves);
+  const last = game.history({ verbose: true }).at(-1);
+  return (
+    <section className="play">
+      <div className="boardcol"><ChessBoard game={game} flip={false} sel={sel} targets={targets} last={last ?? null} onSquare={click} /></div>
+      <aside className="side">
+        <h1 style={{ fontSize: '1.3rem' }}>오프닝 사전</h1>
+        <p role="status" aria-live="polite">{moves.length === 0 ? '기물을 움직이거나 아래 후보를 눌러 시작하세요.' : cur ? <><strong>{cur.name}</strong> ({cur.eco}){cur.ply < moves.length ? <span className="note"> · {cur.ply}수까지의 이름입니다</span> : null}</> : '수록된 라인에 없는 위치입니다.'}</p>
+        <p className="note">{moves.join(' ') || '시작 위치'}</p>
+        <div className="row"><button onClick={() => sync(moves.slice(0, -1))} disabled={!moves.length}>한 수 취소</button><button onClick={() => sync([])} disabled={!moves.length}>처음으로</button></div>
+        <h2 style={{ fontSize: '1.05rem' }}>수록된 다음 수</h2>
+        {next.length ? <ul className="cont">{next.map((c) => <li key={c.san}><button onClick={() => sync([...moves, c.san])}><strong>{c.san}</strong>{c.named ? ` · ${c.named.name}` : ''} <span className="note">(하위 라인 {c.lines}개)</span></button></li>)}</ul>
+          : <p className="empty">이 위치 이후로 수록된 라인이 없습니다.</p>}
+        <p className="note">이 사전은 “이름이 붙은 알려진 수순”의 목록입니다. 승·무·패 통계나 게임 수는 포함하지 않으며(대량 대국 데이터 없음), 하위 라인 수는 사전에 실린 항목 수입니다. 출처: lichess-org/chess-openings ({data.source.license}), 항목 {data.source.entries}개.</p>
+        <button onClick={back}>학습으로</button>
+      </aside>
     </section>
   );
 }

@@ -101,6 +101,13 @@ export class Store {
       this.run('UPDATE games SET white_id=NULL, white_name=\'(탈퇴)\' WHERE white_id=?', id);
       this.run('UPDATE games SET black_id=NULL, black_name=\'(탈퇴)\' WHERE black_id=?', id);
       this.run('UPDATE reports SET reporter=NULL WHERE reporter=?', id); this.run('UPDATE reports SET target=NULL WHERE target=?', id);
+      // clubs: ownership passes to the longest-standing admin, else member; a club with nobody left is deleted
+      for (const c of this.all('SELECT club_id FROM club_members WHERE user_id=? AND role=\'owner\' AND status=\'active\'', id)) {
+        const next = this.get('SELECT user_id FROM club_members WHERE club_id=? AND user_id<>? AND status=\'active\' ORDER BY CASE role WHEN \'admin\' THEN 0 ELSE 1 END, rowid LIMIT 1', c.club_id, id);
+        if (next) this.run('UPDATE club_members SET role=\'owner\' WHERE club_id=? AND user_id=?', c.club_id, next.user_id); else this.run('DELETE FROM clubs WHERE id=?', c.club_id);
+      }
+      this.run('UPDATE audit_log SET admin_id=NULL WHERE admin_id=?', id); this.run('UPDATE tournaments SET created_by=NULL WHERE created_by=?', id);
+      this.run('UPDATE season_results SET user_id=NULL WHERE user_id=?', id);
       this.run('DELETE FROM users WHERE id=?', id);
     });
   }
@@ -278,6 +285,14 @@ export class Store {
     this.run('INSERT INTO reports(reporter,target,reason,game_id,created,kind,context) VALUES(?,?,?,?,?,?,?)', me, t.id, reason, gameId ? String(gameId).slice(0, 40) : null, this.now(), kind, context ? Store.redact(context, 2500) : null);
   }
 
+  // ---- unfinished online rooms (restart recovery) ----
+  saveRoom(code: string, data: string) { this.run('INSERT INTO rooms VALUES(?,?,?) ON CONFLICT(code) DO UPDATE SET data=?, updated=?', code, data, this.now(), data, this.now()); }
+  dropRoom(code: string) { this.run('DELETE FROM rooms WHERE code=?', code); }
+  loadRooms(): string[] { return this.all('SELECT data FROM rooms').map((r) => r.data as string); }
+  gameRecorded(id: string) { return !!this.get('SELECT 1 FROM games WHERE id=?', id); }
+  setMeta(k: string, v: string) { this.run('INSERT INTO meta VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=?', k, v, v); }
+  getMeta(k: string) { return this.get('SELECT v FROM meta WHERE k=?', k)?.v as string | undefined; }
+
   // ---- email tokens, password reset ----
   admins = new Set<string>();
   userByEmail(email: string) { return this.get('SELECT id,email,name,email_verified FROM users WHERE email=?', String(email ?? '').trim().toLowerCase()); }
@@ -292,6 +307,7 @@ export class Store {
     this.run('INSERT INTO tokens VALUES(?,?,?,?,0,?)', sha(raw), userId, kind, this.now() + ttlMs, this.now());
     return raw;
   }
+  revokeToken(raw: string) { this.run('DELETE FROM tokens WHERE hash=?', sha(String(raw))); }
   /** One-time use: succeeds once, then the same token is rejected. */
   consumeToken(raw: string, kind: 'verify' | 'reset'): number {
     return this.tx(() => {
@@ -338,6 +354,12 @@ export class Store {
 
   exportUser(id: number) {
     const u = this.get('SELECT id,email,name,created,coins,is_public FROM users WHERE id=?', id)!;
-    return { user: u, ratings: this.ratings(id), games: this.all('SELECT * FROM games WHERE white_id=? OR black_id=?', id, id), inventory: this.inventory(id), equipped: this.equipped(id), friends: this.friends(id) };
+    return {
+      user: u, ratings: this.ratings(id), games: this.all('SELECT * FROM games WHERE white_id=? OR black_id=?', id, id), inventory: this.inventory(id), equipped: this.equipped(id), friends: this.friends(id),
+      clubs: this.all('SELECT c.name,m.role,m.status FROM club_members m JOIN clubs c ON c.id=m.club_id WHERE m.user_id=?', id),
+      tournaments: this.all('SELECT t.name,p.points,p.played,p.wins,p.final_rank FROM tournament_players p JOIN tournaments t ON t.id=p.tid WHERE p.user_id=?', id),
+      reportsFiled: this.all('SELECT kind,reason,created,status FROM reports WHERE reporter=?', id),
+      seasonClaims: this.all('SELECT season,reward FROM season_claims WHERE user_id=?', id),
+    };
   }
 }

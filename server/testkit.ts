@@ -7,16 +7,17 @@ import { createMailer } from './mail';
 import type { ClientMsg, ServerMsg, RoomView } from '../src/protocol';
 
 export interface Harness { app: App; base: string; port: number; clock: { t: number }; close(): Promise<void> }
-export async function harness(env: Record<string, string | undefined> = {}, start = Date.parse('2026-11-01T00:00:00Z'), mailer = createMailer({ ADMIN_EMAILS: 'boss@x.com', ...env })): Promise<Harness> {
-  const clock = { t: start }; const now = () => clock.t;
+export async function harness(env: Record<string, string | undefined> = {}, start = Date.parse('2026-11-01T00:00:00Z'), mailer = createMailer({ ADMIN_EMAILS: 'boss@x.com', ...env }), dbPath = ':memory:', clockRef?: { t: number }): Promise<Harness> {
+  const clock = clockRef ?? { t: start }; const now = () => clock.t;
   const e = { ADMIN_EMAILS: 'boss@x.com', ...env };
-  const app = createApp(new Store(':memory:', now), { dist: '/nonexistent', now, env: e, mailer });
+  const app = createApp(new Store(dbPath, now), { dist: '/nonexistent', now, env: e, mailer });
   await new Promise<void>((r) => app.server.listen(0, r));
   const port = (app.server.address() as AddressInfo).port;
   return { app, port, base: `http://localhost:${port}`, clock, close: () => app.close() };
 }
 export async function account(h: Harness, name: string, email = `${name}@x.com`) {
-  const r = await fetch(`${h.base}/api/register`, { method: 'POST', body: JSON.stringify({ email, name, password: 'password1' }) });
+  let r = await fetch(`${h.base}/api/register`, { method: 'POST', body: JSON.stringify({ email, name, password: 'password1' }) });
+  if (r.status === 409) r = await fetch(`${h.base}/api/login`, { method: 'POST', body: JSON.stringify({ email, password: 'password1' }) }); // existing account (restart tests reuse a DB)
   expect(r.status).toBe(200);
   const cookie = r.headers.get('set-cookie')!.split(';')[0];
   const call = (path: string, method = 'GET', body?: unknown) => fetch(h.base + path, { method, headers: { cookie }, body: body ? JSON.stringify(body) : undefined }).then(async (x) => ({ status: x.status, json: await x.json().catch(() => null) as any }));

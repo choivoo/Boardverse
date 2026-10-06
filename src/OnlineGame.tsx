@@ -82,7 +82,8 @@ export function OnlineGame({ view, exit }: { view: RoomView; exit: () => void })
         {bar(view.you)}
       </div>
       <aside className="side">
-        {conn !== 'open' && <p className="banner" role="alert">연결이 끊겼습니다. 다시 연결하는 중…</p>}
+        {conn !== 'open' && <p className="banner" role="alert">연결이 끊겼습니다. 다시 연결하는 중… (서버가 재시작되어도 2분 안에 돌아오면 대국이 이어집니다)</p>}
+        {view.notice && <p className="banner" role="status">{view.notice}</p>}
         <p className="status" role="status" aria-live="polite">{st} <span className="badge">{view.tournament ? '대회' : view.rated ? '평가' : '친선'}</span></p>
         {theyOffered && view.status === 'playing' && <div className="banner" role="alert">상대가 무승부를 제안했습니다. <button className="primary" onClick={() => send({ t: 'draw', action: 'accept' })}>수락</button> <button onClick={() => send({ t: 'draw', action: 'decline' })}>거절</button></div>}
         {view.chess && <ol className="moves" aria-label="수 기록">{Array.from({ length: Math.ceil(view.chess.history.length / 2) }, (_, i) => <li key={i}>{view.chess!.history[2 * i]} {view.chess!.history[2 * i + 1] ?? ''}</li>)}</ol>}

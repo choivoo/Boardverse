@@ -1,5 +1,5 @@
 import { Chess } from 'chess.js';
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomInt, randomUUID, createHash } from 'node:crypto';
 import { newGomoku, playGomoku, type GomokuState } from '../src/games/gomoku';
 import { chessEnd, TIME_CONTROLS } from '../src/games/chess';
 import type { ClientMsg, RoomView, ServerMsg, Side, GameKind } from '../src/protocol';
@@ -17,11 +17,24 @@ export interface Hooks {
   isFriend?(a: number, b: number): boolean;
   userByName?(name: string): { id: number } | undefined;
   record?(g: GameSummary): { w: number; b: number } | null;
+  /** persistence of unfinished rooms; all optional so the manager also works purely in memory (tests) */
+  persist?(code: string, snapshot: RoomSnapshot): void;
+  drop?(code: string): void;
+  alreadyRecorded?(roomId: string): boolean;
+  heartbeat?(now: number): void;
 }
-interface Player { token: string; name: string; side: Side; userId: number | null; conn: Conn | null; lostAt: number | null }
+/** Everything needed to rebuild an unfinished room. Tokens are stored hashed only. */
+export interface RoomSnapshot {
+  v: 1; id: string; code: string; opts: Opts; status: 'waiting' | 'playing';
+  players: { tokenHash: string; name: string; side: Side; userId: number | null }[];
+  moves: string[]; clocks: { w: number; b: number } | null; incMs: number; turnStart: number; drawOffer: Side | null; created: number; savedAt: number;
+}
+const sha = (x: string) => createHash('sha256').update(x).digest('hex');
+interface Player { tokenHash: string; name: string; side: Side; userId: number | null; conn: Conn | null; lostAt: number | null }
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const FORFEIT_MS = 120_000, IDLE_MS = 30 * 60_000, MAX_ROOMS = 1000, MAX_QUEUE = 500, RATING_WINDOW = 400;
-interface Opts { game: GameKind; time: string; size: number; rated: boolean; spectate: boolean; tid?: number }
+export interface Opts { game: GameKind; time: string; size: number; rated: boolean; spectate: boolean; tid?: number }
+const HEARTBEAT_MS = 5000, ROOM_MAX_AGE_MS = 24 * 3600_000;
 const MAX_SPECTATORS = 20, CHAT_MAX = 200;
 const URL_RE = /(https?:|www\.|[a-z0-9-]+\.(com|net|org|io|kr|co|me|gg|xyz)\b)/i;
 
@@ -34,14 +47,14 @@ export class Room {
   clocks: { w: number; b: number } | null = null; turnStart = 0; incMs = 0;
   drawOffer: Side | null = null; rematch = new Set<Side>(); recorded = false;
   spectators = new Set<Conn>(); chat: { name: string; side: Side; text: string; at: number }[] = [];
-  touched: number; id: string;
-  constructor(public code: string, public opts: Opts, now: number) { this.touched = now; this.id = `${code}-${now.toString(36)}-${randomInt(1e6).toString(36)}`; }
+  touched: number; id: string; created: number; notice?: string;
+  constructor(public code: string, public opts: Opts, now: number) { this.touched = now; this.created = now; this.id = `${code}-${now.toString(36)}-${randomInt(1e6).toString(36)}`; }
   get game() { return this.opts.game; }
   get n() { return this.game === 'chess' ? this.chess!.history().length : this.gomoku!.moves.length; }
   get turn(): Side { return this.game === 'chess' ? this.chess!.turn() : this.gomoku!.turn === 'B' ? 'w' : 'b'; }
   moveList(): string[] { return this.game === 'chess' ? this.chess!.history() : this.gomoku!.moves.map(String); }
   view(you: Side, spectator = false): RoomView {
-    const v: RoomView = { code: this.code, spectators: this.spectators.size, spectate: this.opts.spectate, spectator: spectator || undefined, tournament: this.opts.tid, chat: spectator ? undefined : this.chat.slice(-30), game: this.game, status: this.status, rated: this.opts.rated, time: this.opts.time, drawOffer: this.drawOffer, rematch: [...this.rematch], you, n: this.n, turn: this.turn, result: this.result,
+    const v: RoomView = { code: this.code, notice: this.notice, spectators: this.spectators.size, spectate: this.opts.spectate, spectator: spectator || undefined, tournament: this.opts.tid, chat: spectator ? undefined : this.chat.slice(-30), game: this.game, status: this.status, rated: this.opts.rated, time: this.opts.time, drawOffer: this.drawOffer, rematch: [...this.rematch], you, n: this.n, turn: this.turn, result: this.result,
       players: this.players.map((p) => ({ name: p.name, side: p.side, connected: !!p.conn, registered: p.userId !== null })) };
     if (this.chess) v.chess = { fen: this.chess.fen(), history: this.chess.history(), last: this.lastMove, clocks: this.clocks && { ...this.clocks }, running: this.status === 'playing' && this.clocks ? this.turn : null };
     if (this.gomoku) v.gomoku = { size: this.gomoku.size, board: this.gomoku.board, moves: this.gomoku.moves, winLine: this.gomoku.winLine };
@@ -59,6 +72,7 @@ export class RoomManager {
   rooms = new Map<string, Room>();
   queue: { conn: Conn; opts: Opts; rating: number }[] = [];
   users = new Map<number, Set<Conn>>();
+  private lastBeat = 0;
   constructor(private now: () => number = Date.now, private hooks: Hooks = {}) {}
 
   // ---- presence ----
@@ -128,11 +142,12 @@ export class RoomManager {
       case 'unqueue': this.leaveQueue(conn); conn.send({ t: 'unqueued' }); return;
       case 'resume': {
         const room = this.rooms.get(String(m.code ?? '').toUpperCase());
-        const p = room?.players.find((x) => x.token === m.token);
-        if (!room || !p) return err('이전 대국을 찾을 수 없습니다.', true);
+        const p = room?.players.find((x) => x.tokenHash === sha(String(m.token ?? '')));
+        if (!room || !p) return err('이전 대국을 찾을 수 없습니다. 이미 끝났거나, 서버 점검 뒤 2분 안에 돌아오지 않아 취소되었을 수 있습니다.', true);
+        if (p.userId !== null && conn.userId !== p.userId) return err('이 대국은 로그인한 계정으로만 이어서 할 수 있습니다.', true);
         if (p.conn && p.conn !== conn) p.conn.send({ t: 'error', msg: '다른 기기에서 접속했습니다.', fatal: true });
         p.conn = conn; p.lostAt = null; conn.room = room; conn.side = p.side; room.touched = this.now();
-        conn.send({ t: 'joined', token: p.token, view: room.view(p.side) });
+        conn.send({ t: 'joined', token: String(m.token), view: room.view(p.side) });
         room.broadcast();
         return;
       }
@@ -149,7 +164,7 @@ export class RoomManager {
         else if (m.action === 'accept') { if (!room.drawOffer || room.drawOffer === conn.side) return err('수락할 제안이 없습니다.'); this.finish(room, 'draw', '합의 무승부'); }
         else if (m.action === 'decline') { if (!room.drawOffer || room.drawOffer === conn.side) return err('거절할 제안이 없습니다.'); room.drawOffer = null; }
         else return err('잘못된 요청입니다.');
-        room.broadcast(); return;
+        this.save(room); room.broadcast(); return;
       }
       case 'rematch': return this.rematch(conn, err);
       case 'invite': return this.invite(conn, m.to, err);
@@ -158,11 +173,13 @@ export class RoomManager {
   }
 
   private seat(conn: Conn, room: Room, side: Side, name: string) {
-    const p: Player = { token: randomUUID(), name, side, userId: conn.userId ?? null, conn, lostAt: null };
+    const token = randomUUID();
+    const p: Player = { tokenHash: sha(token), name, side, userId: conn.userId ?? null, conn, lostAt: null };
     room.players.push(p); conn.room = room; conn.side = side; room.touched = this.now();
-    conn.send({ t: 'joined', token: p.token, view: room.view(side) });
+    conn.send({ t: 'joined', token, view: room.view(side) });
+    this.save(room);
   }
-  private start(room: Room) { room.status = 'playing'; room.turnStart = this.now(); room.broadcast(); }
+  private start(room: Room) { room.status = 'playing'; room.turnStart = this.now(); this.save(room); room.broadcast(); }
 
   // ---- matchmaking ----
   private enqueue(conn: Conn, m: Extract<ClientMsg, { t: 'queue' }>, err: (s: string) => void) {
@@ -202,8 +219,44 @@ export class RoomManager {
     // colours swap
     for (const p of room.players) { this.seat(p.conn!, next, p.side === 'w' ? 'b' : 'w', p.name); }
     this.start(next);
-    this.rooms.delete(room.code);
+    this.rooms.delete(room.code); this.hooks.drop?.(room.code);
   }
+  // ---- persistence ----
+  private save(room: Room) {
+    if (!this.hooks.persist || room.status === 'over') return;
+    this.hooks.persist(room.code, {
+      v: 1, id: room.id, code: room.code, opts: room.opts, status: room.status === 'playing' ? 'playing' : 'waiting',
+      players: room.players.map((p) => ({ tokenHash: p.tokenHash, name: p.name, side: p.side, userId: p.userId })),
+      moves: room.moveList(), clocks: room.clocks && { ...room.clocks }, incMs: room.incMs, turnStart: room.turnStart, drawOffer: room.drawOffer, created: room.created, savedAt: this.now(),
+    });
+  }
+  /** Rebuilds unfinished rooms after a restart.
+   *  CLOCK POLICY: the server being down does not cost anyone time. The running clock is rewound to the time that had elapsed
+   *  at the last server heartbeat (written every 5 s), so at most ~5 s of the mover's thinking time can be lost or gained.
+   *  Every player counts as disconnected from the restart moment and gets the normal 120 s window to come back. */
+  restore(snaps: string[], heartbeat: number | null): number {
+    const t = this.now(); let n = 0;
+    for (const raw of snaps) {
+      try {
+        const s = JSON.parse(raw) as RoomSnapshot;
+        if (s.v !== 1 || this.rooms.has(s.code) || t - s.created > ROOM_MAX_AGE_MS || this.hooks.alreadyRecorded?.(s.id)) { this.hooks.drop?.(s.code); continue; }
+        const room = new Room(s.code, s.opts, t); room.id = s.id; room.created = s.created;
+        if (s.opts.game === 'chess') {
+          room.chess = new Chess(); let last: { from: string; to: string } | null = null;
+          for (const san of s.moves) { const mv = room.chess.move(san); last = { from: mv.from, to: mv.to }; }
+          room.lastMove = last;
+        } else { room.gomoku = newGomoku(s.opts.size); for (const i of s.moves) { const nx = playGomoku(room.gomoku, Number(i)); if (!nx) throw new Error('bad move'); room.gomoku = nx; } }
+        room.status = s.status; room.clocks = s.clocks; room.incMs = s.incMs; room.drawOffer = s.drawOffer;
+        const alive = Math.max(heartbeat ?? s.savedAt, s.savedAt);
+        room.turnStart = t - Math.max(0, alive - s.turnStart); // downtime excluded
+        room.players = s.players.map((p) => ({ tokenHash: p.tokenHash, name: p.name, side: p.side, userId: p.userId, conn: null, lostAt: t }));
+        if (s.status === 'playing') { const down = Math.max(0, Math.round((t - alive) / 60000)); room.notice = `서버가 재시작되었습니다. 점검 시간(약 ${down}분)은 시계에서 제외되었고, 시계는 재시작 직전 상태에서 이어집니다.`; }
+        this.rooms.set(room.code, room); n++;
+      } catch { try { this.hooks.drop?.((JSON.parse(raw) as RoomSnapshot).code); } catch { /* corrupt row */ } }
+    }
+    return n;
+  }
+
   // ---- spectating (read-only) ----
   private watch(conn: Conn, code: string, err: (s: string) => void) {
     const room = this.rooms.get(String(code ?? '').toUpperCase());
@@ -262,12 +315,14 @@ export class RoomManager {
   private finish(room: Room, winner: Side | 'draw', reason: string) {
     if (room.status === 'over') return;
     room.status = 'over'; room.result = { winner, reason }; room.drawOffer = null;
-    if (room.recorded || !this.hooks.record) return;
+    if (room.recorded) return;
     room.recorded = true;
+    if (!this.hooks.record) { this.hooks.drop?.(room.code); return; }
     const w = room.players.find((p) => p.side === 'w')!, b = room.players.find((p) => p.side === 'b')!;
     const delta = this.hooks.record({ id: room.id, game: room.game, whiteId: w.userId, blackId: b.userId, whiteName: w.name, blackName: b.name,
       rated: room.opts.rated, time: room.opts.time, result: winner, reason, moves: room.moveList(), tid: room.opts.tid ?? null });
     if (delta && room.opts.rated) room.result.ratingDelta = delta;
+    this.hooks.drop?.(room.code); // after the result is recorded: a crash in between is detected by alreadyRecorded() at restore
   }
 
   private move(conn: Conn, m: Extract<ClientMsg, { t: 'move' }>, err: (s: string) => void) {
@@ -289,16 +344,17 @@ export class RoomManager {
         room.clocks[conn.side] += room.incMs - (t - room.turnStart);
         room.turnStart = t;
       }
-      room.drawOffer = null;
+      room.drawOffer = null; room.notice = undefined;
       const e = chessEnd(g);
       if (e.over) this.finish(room, e.result, e.reason);
     } else {
       const next = playGomoku(room.gomoku!, m.idx as number);
       if (!next) return err('둘 수 없는 자리입니다.');
-      room.gomoku = next; room.drawOffer = null;
+      room.gomoku = next; room.drawOffer = null; room.notice = undefined;
       if (next.status === 'won') this.finish(room, conn.side, '5목 완성');
       else if (next.status === 'draw') this.finish(room, 'draw', '판이 가득 참');
     }
+    this.save(room);
     room.broadcast();
   }
 
@@ -322,13 +378,15 @@ export class RoomManager {
   /** Call periodically: clock expiry, disconnect forfeits, idle room cleanup. */
   tick() {
     const t = this.now();
+    if (!this.lastBeat || t - this.lastBeat >= HEARTBEAT_MS) { this.lastBeat = t; this.hooks.heartbeat?.(t); }
     for (const [code, room] of this.rooms) {
+      if (room.status === 'playing' && room.players.length === 2 && room.players.every((p) => p.lostAt !== null && t - p.lostAt > FORFEIT_MS)) { this.rooms.delete(code); this.hooks.drop?.(code); continue; } // both gone: cancelled, nothing recorded
       if (this.checkClock(room)) room.broadcast();
       if (room.status === 'playing') {
         const gone = room.players.find((p) => p.lostAt !== null && t - p.lostAt > FORFEIT_MS);
         if (gone) { this.finish(room, gone.side === 'w' ? 'b' : 'w', '상대 연결 끊김'); room.broadcast(); }
       }
-      if (t - room.touched > IDLE_MS && room.players.every((p) => !p.conn)) this.rooms.delete(code);
+      if (t - room.touched > IDLE_MS && room.players.every((p) => !p.conn)) { this.rooms.delete(code); this.hooks.drop?.(code); }
     }
   }
 }

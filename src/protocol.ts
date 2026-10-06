@@ -25,6 +25,8 @@ export interface RoomView {
   /** side that currently offers a draw, if any */
   drawOffer: Side | null;
   rematch: Side[];
+  /** set after a server restart restored this room (clock policy explanation) */
+  notice?: string;
   spectators: number;
   spectate: boolean;
   /** true when this view is for a read-only spectator (you is meaningless then) */
