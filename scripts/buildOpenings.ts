@@ -1,17 +1,22 @@
 // Builds src/openingsData.json from the lichess-org/chess-openings TSV files (CC0 / public domain, see README of that repo).
-// Usage: npx tsx scripts/buildOpenings.ts <dir-with-a..e.tsv> <source-commit-sha>
+// Usage: node scripts/fetch-openings.mjs <sha> <dir> && npx tsx scripts/buildOpenings.ts <dir> <sha> <YYYY-MM-DD fetched>
+// Deterministic: the same inputs always give a byte-identical src/openingsData.json (no clock, input file hashes are embedded).
 // The result is a *name dictionary of known lines* + the continuations that exist between them. It contains NO win/draw/loss
 // statistics: we have no game database, and we do not invent numbers.
 import { Chess } from 'chess.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export const epd = (g: Chess) => g.fen().split(' ').slice(0, 4).join(' ');
-const dir = process.argv[2] ?? '/tmp/openings', sha = process.argv[3] ?? 'unknown';
+const dir = process.argv[2], sha = process.argv[3], fetched = process.argv[4];
+if (!dir || !/^[0-9a-f]{40}$/.test(sha ?? '') || !/^\d{4}-\d{2}-\d{2}$/.test(fetched ?? '')) { console.error('usage: buildOpenings.ts <dir> <40-hex commit sha> <YYYY-MM-DD>'); process.exit(2); }
+const fileHashes: Record<string, string> = {};
 const names: [string, string][] = []; const pos: Record<string, { n?: number; c: string[]; d: number }> = {};
 let total = 0, skipped = 0;
 for (const f of ['a', 'b', 'c', 'd', 'e']) {
-  for (const line of readFileSync(join(dir, `${f}.tsv`), 'utf8').split('\n').slice(1)) {
+  const text = readFileSync(join(dir, `${f}.tsv`), 'utf8'); fileHashes[`${f}.tsv`] = createHash('sha256').update(text).digest('hex');
+  for (const line of text.split('\n').slice(1)) {
     if (!line.trim()) continue; const [eco, name, pgn] = line.split('\t'); total++;
     const g = new Chess();
     try { g.loadPgn(pgn); } catch { skipped++; continue; }
@@ -25,6 +30,6 @@ for (const f of ['a', 'b', 'c', 'd', 'e']) {
   }
 }
 for (const p of Object.values(pos)) p.c.sort();
-const out = { v: 1, source: { repo: 'https://github.com/lichess-org/chess-openings', commit: sha, files: ['a.tsv', 'b.tsv', 'c.tsv', 'd.tsv', 'e.tsv'], license: 'CC0 1.0 / public domain (per the repository README, section "Copyright")', fetched: new Date().toISOString().slice(0, 10), entries: total - skipped }, names, pos };
+const out = { v: 1, source: { repo: 'https://github.com/lichess-org/chess-openings', commit: sha, files: fileHashes, license: 'CC0 1.0 / public domain (per the repository README, section "Copyright")', fetched, entries: total - skipped }, names, pos };
 writeFileSync('src/openingsData.json', JSON.stringify(out));
 console.log(`entries ${total - skipped}/${total}, positions ${Object.keys(pos).length}, names ${names.length}`);

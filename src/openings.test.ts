@@ -7,6 +7,7 @@ let d: OpeningData; beforeAll(async () => { d = await loadOpenings(); });
 describe('opening dictionary (lichess-org/chess-openings, CC0)', () => {
   it('records its source and license and holds no invented statistics', () => {
     expect(d.source.repo).toBe('https://github.com/lichess-org/chess-openings'); expect(d.source.license).toMatch(/CC0/); expect(d.source.entries).toBeGreaterThan(3000);
+    expect((d.source as any).commit).toMatch(/^[0-9a-f]{40}$/); expect(Object.keys((d.source as any).files)).toEqual(['a.tsv', 'b.tsv', 'c.tsv', 'd.tsv', 'e.tsv']); expect(Object.values((d.source as any).files).every((h) => /^[0-9a-f]{64}$/.test(h as string))).toBe(true);
     const sample = Object.values(d.pos)[0]; expect(Object.keys(sample).sort()).toEqual(['c', 'd', 'n'].filter((k) => k in sample).sort()); // only line counts; no wins/draws/losses
     expect(JSON.stringify(d).includes('"win')).toBe(false);
   });

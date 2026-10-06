@@ -160,7 +160,7 @@ export function ReplayView({ data, back }: { data: ReplayData; back: () => void 
 function OpeningLine({ moves }: { moves: string[] }) {
   const data = useOpenings(); const o = data ? lookup(data, moves) : null;
   if (!data) return <p className="note">오프닝 사전을 불러오는 중…</p>;
-  return <p className="note" role="status">{o ? <>오프닝: <strong>{o.name}</strong> ({o.eco}) · 출처 lichess-org/chess-openings (CC0)</> : '오프닝 이름 없음 (수록된 라인 밖)'}</p>;
+  return <p className="note" role="status">{o ? <>오프닝: <strong>{o.name}</strong> ({o.eco}){o.ply < moves.length ? ` · ${o.ply}수까지의 이름` : ''} · 출처 lichess-org/chess-openings (CC0)</> : '오프닝 이름 없음 (수록된 라인 밖)'}</p>;
 }
 
 export function ReplayHub({ open, serverGameId }: { open: (d: ReplayData) => void; serverGameId?: string }) {

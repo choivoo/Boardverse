@@ -213,6 +213,8 @@ function Help({ back }: { back: () => void }) {
       <p>로그인한 두 사람이 평가 대국을 하면 Elo 방식으로 레이팅이 바뀝니다(시작 1200, 20판 미만 K=40, 이후 K=20). 체스와 오목은 따로 계산되며, 수가 2개 미만인 대국·게스트·컴퓨터 대국·친선 대국은 반영되지 않습니다.</p>
       <h2>데이터 저장</h2>
       <p>게스트: 최근 기록(최대 50개)과 퍼즐 진행은 이 브라우저(localStorage)에만 저장됩니다. 로그인: 계정, 레이팅, 코인, 보유 아이템, 온라인 대국 기록은 서버 DB에 저장되며 내 정보에서 내보내기·삭제할 수 있습니다. 진행 중인 컴퓨터/로컬 대국은 새로고침하면 사라집니다.</p>
+      <h2>오픈소스 고지</h2>
+      <p>체스 엔진 분석에는 Stockfish(GPL-3.0)가, 오프닝 이름에는 lichess-org/chess-openings(CC0) 자료가 쓰입니다. <a href="/engine/NOTICES.md">고지문</a> · <a href="/engine/SOURCE.txt">엔진 출처·소스 위치</a> · <a href="/engine/COPYING.txt">GPL-3.0 전문</a></p>
       <button onClick={back}>뒤로</button>
     </section>
   );
