@@ -3,32 +3,43 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { newGomoku, playGomoku, type GomokuState } from '../src/games/gomoku';
 import { chessEnd, TIME_CONTROLS } from '../src/games/chess';
 import type { ClientMsg, RoomView, ServerMsg, Side, GameKind } from '../src/protocol';
+import type { GameSummary } from './store';
 
-export interface Conn { send(m: ServerMsg): void; room?: Room; side?: Side }
-interface Player { token: string; name: string; side: Side; conn: Conn | null; lostAt: number | null }
+export interface Conn { send(m: ServerMsg): void; room?: Room; side?: Side; userId?: number; userName?: string; queued?: boolean }
+export interface Hooks {
+  blocked?(a: number, b: number): boolean;
+  rating?(userId: number, game: GameKind): number;
+  isFriend?(a: number, b: number): boolean;
+  userByName?(name: string): { id: number } | undefined;
+  record?(g: GameSummary): { w: number; b: number } | null;
+}
+interface Player { token: string; name: string; side: Side; userId: number | null; conn: Conn | null; lostAt: number | null }
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-const FORFEIT_MS = 120_000, IDLE_MS = 30 * 60_000, MAX_ROOMS = 1000;
+const FORFEIT_MS = 120_000, IDLE_MS = 30 * 60_000, MAX_ROOMS = 1000, MAX_QUEUE = 500, RATING_WINDOW = 400;
+interface Opts { game: GameKind; time: string; size: number; rated: boolean }
 
 export class Room {
   players: Player[] = [];
   status: 'waiting' | 'playing' | 'over' = 'waiting';
-  result?: { winner: Side | 'draw'; reason: string };
+  result?: { winner: Side | 'draw'; reason: string; ratingDelta?: { w: number; b: number } };
   chess?: Chess; lastMove: { from: string; to: string } | null = null;
   gomoku?: GomokuState;
   clocks: { w: number; b: number } | null = null; turnStart = 0; incMs = 0;
-  touched: number;
-  constructor(public code: string, public game: GameKind, now: number) { this.touched = now; }
+  drawOffer: Side | null = null; rematch = new Set<Side>(); recorded = false;
+  touched: number; id: string;
+  constructor(public code: string, public opts: Opts, now: number) { this.touched = now; this.id = `${code}-${now.toString(36)}-${randomInt(1e6).toString(36)}`; }
+  get game() { return this.opts.game; }
   get n() { return this.game === 'chess' ? this.chess!.history().length : this.gomoku!.moves.length; }
   get turn(): Side { return this.game === 'chess' ? this.chess!.turn() : this.gomoku!.turn === 'B' ? 'w' : 'b'; }
+  moveList(): string[] { return this.game === 'chess' ? this.chess!.history() : this.gomoku!.moves.map(String); }
   view(you: Side): RoomView {
-    const v: RoomView = { code: this.code, game: this.game, status: this.status, you, n: this.n, turn: this.turn, result: this.result,
-      players: this.players.map((p) => ({ name: p.name, side: p.side, connected: !!p.conn })) };
+    const v: RoomView = { code: this.code, game: this.game, status: this.status, rated: this.opts.rated, time: this.opts.time, drawOffer: this.drawOffer, rematch: [...this.rematch], you, n: this.n, turn: this.turn, result: this.result,
+      players: this.players.map((p) => ({ name: p.name, side: p.side, connected: !!p.conn, registered: p.userId !== null })) };
     if (this.chess) v.chess = { fen: this.chess.fen(), history: this.chess.history(), last: this.lastMove, clocks: this.clocks && { ...this.clocks }, running: this.status === 'playing' && this.clocks ? this.turn : null };
     if (this.gomoku) v.gomoku = { size: this.gomoku.size, board: this.gomoku.board, moves: this.gomoku.moves, winLine: this.gomoku.winLine };
     return v;
   }
   broadcast() { for (const p of this.players) p.conn?.send({ t: 'view', view: this.view(p.side) }); }
-  finish(winner: Side | 'draw', reason: string) { this.status = 'over'; this.result = { winner, reason }; }
 }
 
 function cleanName(s: unknown): string {
@@ -38,7 +49,16 @@ function cleanName(s: unknown): string {
 
 export class RoomManager {
   rooms = new Map<string, Room>();
-  constructor(private now: () => number = Date.now) {}
+  queue: { conn: Conn; opts: Opts; rating: number }[] = [];
+  users = new Map<number, Set<Conn>>();
+  constructor(private now: () => number = Date.now, private hooks: Hooks = {}) {}
+
+  // ---- presence ----
+  attach(conn: Conn, userId: number, name: string) {
+    conn.userId = userId; conn.userName = name;
+    (this.users.get(userId) ?? this.users.set(userId, new Set()).get(userId)!).add(conn);
+  }
+  isOnline(userId: number) { return (this.users.get(userId)?.size ?? 0) > 0; }
 
   private code(): string | null {
     for (let i = 0; i < 20; i++) {
@@ -47,42 +67,57 @@ export class RoomManager {
     }
     return null;
   }
+  private parseOpts(m: { game: GameKind; time?: string; size?: number; rated?: boolean }, conn: Conn): Opts | string {
+    if (m.game !== 'chess' && m.game !== 'gomoku') return '지원하지 않는 게임입니다.';
+    const rated = !!m.rated;
+    if (rated && conn.userId === undefined) return '평가 대국은 로그인이 필요합니다.';
+    const tc = m.game === 'chess' ? TIME_CONTROLS.find((t) => t.id === m.time) ?? TIME_CONTROLS[0] : TIME_CONTROLS[0];
+    return { game: m.game, time: tc.id, size: m.game === 'gomoku' && [13, 15, 19].includes(m.size as number) ? (m.size as number) : 15, rated };
+  }
+  private makeRoom(o: Opts): Room | null {
+    if (this.rooms.size >= MAX_ROOMS) return null;
+    const code = this.code(); if (!code) return null;
+    const room = new Room(code, o, this.now());
+    if (o.game === 'chess') {
+      room.chess = new Chess();
+      const tc = TIME_CONTROLS.find((t) => t.id === o.time)!;
+      if (tc.baseSec) { room.clocks = { w: tc.baseSec * 1000, b: tc.baseSec * 1000 }; room.incMs = tc.incSec * 1000; }
+    } else room.gomoku = newGomoku(o.size);
+    this.rooms.set(code, room);
+    return room;
+  }
 
   handle(conn: Conn, m: ClientMsg): void {
     const err = (msg: string, fatal = false) => conn.send({ t: 'error', msg, fatal });
     if (!m || typeof m !== 'object' || typeof (m as { t?: unknown }).t !== 'string') return err('잘못된 요청입니다.');
     switch (m.t) {
       case 'create': {
-        if (m.game !== 'chess' && m.game !== 'gomoku') return err('지원하지 않는 게임입니다.');
-        if (this.rooms.size >= MAX_ROOMS) return err('서버가 가득 찼습니다. 잠시 후 다시 시도하세요.');
-        const code = this.code(); if (!code) return err('방을 만들 수 없습니다.');
-        const room = new Room(code, m.game, this.now());
-        if (m.game === 'chess') {
-          room.chess = new Chess();
-          const tc = TIME_CONTROLS.find((t) => t.id === m.time) ?? TIME_CONTROLS[0];
-          if (tc.baseSec) { room.clocks = { w: tc.baseSec * 1000, b: tc.baseSec * 1000 }; room.incMs = tc.incSec * 1000; }
-        } else {
-          room.gomoku = newGomoku([13, 15, 19].includes(m.size as number) ? (m.size as number) : 15);
-        }
-        const side: Side = m.side === 'w' || m.side === 'b' ? m.side : randomInt(2) ? 'w' : 'b';
-        this.rooms.set(code, room);
-        this.seat(conn, room, side, cleanName(m.name));
+        const o = this.parseOpts(m, conn); if (typeof o === 'string') return err(o);
+        const room = this.makeRoom(o); if (!room) return err('서버가 가득 찼습니다. 잠시 후 다시 시도하세요.');
+        this.leaveQueue(conn);
+        this.seat(conn, room, m.side === 'w' || m.side === 'b' ? m.side : randomInt(2) ? 'w' : 'b', cleanName(conn.userName ?? m.name));
         return;
       }
       case 'join': {
         const room = this.rooms.get(String(m.code ?? '').toUpperCase());
         if (!room) return err('방을 찾을 수 없습니다. 코드를 확인하세요.');
-        if (room.players.length >= 2) return err('이미 가득 찬 방입니다.');
-        this.seat(conn, room, room.players[0].side === 'w' ? 'b' : 'w', cleanName(m.name));
-        room.status = 'playing'; room.turnStart = this.now();
-        room.broadcast();
+        if (room.players.length >= 2 || room.status !== 'waiting') return err('이미 가득 찬 방입니다.');
+        if (room.opts.rated && conn.userId === undefined) return err('평가 대국은 로그인이 필요합니다.');
+        const host = room.players[0];
+        if (conn.userId !== undefined && host.userId === conn.userId) return err('자신이 만든 방에는 다시 들어갈 수 없습니다.');
+        if (conn.userId !== undefined && host.userId !== null && this.hooks.blocked?.(conn.userId, host.userId)) return err('이 방에는 입장할 수 없습니다.');
+        this.leaveQueue(conn);
+        this.seat(conn, room, host.side === 'w' ? 'b' : 'w', cleanName(conn.userName ?? m.name));
+        this.start(room);
         return;
       }
+      case 'queue': return this.enqueue(conn, m, err);
+      case 'unqueue': this.leaveQueue(conn); conn.send({ t: 'unqueued' }); return;
       case 'resume': {
         const room = this.rooms.get(String(m.code ?? '').toUpperCase());
         const p = room?.players.find((x) => x.token === m.token);
         if (!room || !p) return err('이전 대국을 찾을 수 없습니다.', true);
-        p.conn?.send({ t: 'error', msg: '다른 기기에서 접속했습니다.', fatal: true });
+        if (p.conn && p.conn !== conn) p.conn.send({ t: 'error', msg: '다른 기기에서 접속했습니다.', fatal: true });
         p.conn = conn; p.lostAt = null; conn.room = room; conn.side = p.side; room.touched = this.now();
         conn.send({ t: 'joined', token: p.token, view: room.view(p.side) });
         room.broadcast();
@@ -92,16 +127,85 @@ export class RoomManager {
       case 'resign': {
         const room = conn.room;
         if (!room || !conn.side || room.status !== 'playing') return err('진행 중인 대국이 없습니다.');
-        room.finish(conn.side === 'w' ? 'b' : 'w', '기권'); room.broadcast(); return;
+        this.finish(room, conn.side === 'w' ? 'b' : 'w', '기권'); room.broadcast(); return;
       }
+      case 'draw': {
+        const room = conn.room;
+        if (!room || !conn.side || room.status !== 'playing') return err('진행 중인 대국이 없습니다.');
+        if (m.action === 'offer') { if (room.drawOffer) return err('이미 제안이 진행 중입니다.'); room.drawOffer = conn.side; }
+        else if (m.action === 'accept') { if (!room.drawOffer || room.drawOffer === conn.side) return err('수락할 제안이 없습니다.'); this.finish(room, 'draw', '합의 무승부'); }
+        else if (m.action === 'decline') { if (!room.drawOffer || room.drawOffer === conn.side) return err('거절할 제안이 없습니다.'); room.drawOffer = null; }
+        else return err('잘못된 요청입니다.');
+        room.broadcast(); return;
+      }
+      case 'rematch': return this.rematch(conn, err);
+      case 'invite': return this.invite(conn, m.to, err);
       default: return err('알 수 없는 요청입니다.');
     }
   }
 
   private seat(conn: Conn, room: Room, side: Side, name: string) {
-    const p: Player = { token: randomUUID(), name, side, conn, lostAt: null };
+    const p: Player = { token: randomUUID(), name, side, userId: conn.userId ?? null, conn, lostAt: null };
     room.players.push(p); conn.room = room; conn.side = side; room.touched = this.now();
     conn.send({ t: 'joined', token: p.token, view: room.view(side) });
+  }
+  private start(room: Room) { room.status = 'playing'; room.turnStart = this.now(); room.broadcast(); }
+
+  // ---- matchmaking ----
+  private enqueue(conn: Conn, m: Extract<ClientMsg, { t: 'queue' }>, err: (s: string) => void) {
+    if (conn.room && conn.room.status !== 'over') return err('이미 대국 중입니다.');
+    const o = this.parseOpts(m, conn); if (typeof o === 'string') return err(o);
+    this.leaveQueue(conn);
+    if (this.queue.length >= MAX_QUEUE) return err('대기열이 가득 찼습니다.');
+    const rating = conn.userId !== undefined ? this.hooks.rating?.(conn.userId, o.game) ?? 1200 : 1200;
+    const same = (a: Opts, b: Opts) => a.game === b.game && a.time === b.time && a.size === b.size && a.rated === b.rated;
+    const idx = this.queue.findIndex((q) => same(q.opts, o) && q.conn !== conn
+      && !(conn.userId !== undefined && q.conn.userId === conn.userId)
+      && !(conn.userId !== undefined && q.conn.userId !== undefined && this.hooks.blocked?.(conn.userId, q.conn.userId))
+      && (!o.rated || Math.abs(q.rating - rating) <= RATING_WINDOW));
+    if (idx < 0) { this.queue.push({ conn, opts: o, rating }); conn.queued = true; conn.send({ t: 'queued' }); return; }
+    const other = this.queue.splice(idx, 1)[0]; other.conn.queued = false;
+    const room = this.makeRoom(o); if (!room) return err('서버가 가득 찼습니다.');
+    const first = randomInt(2) ? 'w' : 'b';
+    this.seat(other.conn, room, first, cleanName(other.conn.userName ?? m.name));
+    this.seat(conn, room, first === 'w' ? 'b' : 'w', cleanName(conn.userName ?? m.name));
+    this.start(room);
+  }
+  private leaveQueue(conn: Conn) { this.queue = this.queue.filter((q) => q.conn !== conn); conn.queued = false; }
+
+  private rematch(conn: Conn, err: (s: string) => void) {
+    const room = conn.room;
+    if (!room || !conn.side || room.status !== 'over') return err('재대결할 수 없습니다.');
+    if (room.players.some((p) => !p.conn)) return err('상대가 나갔습니다.');
+    room.rematch.add(conn.side);
+    if (room.rematch.size < 2) { room.broadcast(); return; }
+    const next = this.makeRoom(room.opts); if (!next) return err('서버가 가득 찼습니다.');
+    // colours swap
+    for (const p of room.players) { this.seat(p.conn!, next, p.side === 'w' ? 'b' : 'w', p.name); }
+    this.start(next);
+    this.rooms.delete(room.code);
+  }
+  private invite(conn: Conn, to: string, err: (s: string) => void) {
+    const room = conn.room;
+    if (conn.userId === undefined) return err('초대는 로그인이 필요합니다.');
+    if (!room || room.status !== 'waiting') return err('초대할 방이 없습니다.');
+    const target = this.hooks.userByName?.(String(to ?? ''));
+    if (!target || !this.hooks.isFriend?.(conn.userId, target.id) || this.hooks.blocked?.(conn.userId, target.id)) return err('초대할 수 없는 사용자입니다.');
+    const conns = this.users.get(target.id);
+    if (!conns?.size) return err('친구가 오프라인입니다.');
+    for (const c of conns) c.send({ t: 'invited', from: conn.userName ?? '', code: room.code });
+    conn.send({ t: 'info', msg: '초대를 보냈습니다.' });
+  }
+
+  private finish(room: Room, winner: Side | 'draw', reason: string) {
+    if (room.status === 'over') return;
+    room.status = 'over'; room.result = { winner, reason }; room.drawOffer = null;
+    if (room.recorded || !this.hooks.record) return;
+    room.recorded = true;
+    const w = room.players.find((p) => p.side === 'w')!, b = room.players.find((p) => p.side === 'b')!;
+    const delta = this.hooks.record({ id: room.id, game: room.game, whiteId: w.userId, blackId: b.userId, whiteName: w.name, blackName: b.name,
+      rated: room.opts.rated, time: room.opts.time, result: winner, reason, moves: room.moveList() });
+    if (delta && room.opts.rated) room.result.ratingDelta = delta;
   }
 
   private move(conn: Conn, m: Extract<ClientMsg, { t: 'move' }>, err: (s: string) => void) {
@@ -123,14 +227,15 @@ export class RoomManager {
         room.clocks[conn.side] += room.incMs - (t - room.turnStart);
         room.turnStart = t;
       }
+      room.drawOffer = null;
       const e = chessEnd(g);
-      if (e.over) room.finish(e.result, e.reason);
+      if (e.over) this.finish(room, e.result, e.reason);
     } else {
       const next = playGomoku(room.gomoku!, m.idx as number);
       if (!next) return err('둘 수 없는 자리입니다.');
-      room.gomoku = next;
-      if (next.status === 'won') room.finish(conn.side, '5목 완성');
-      else if (next.status === 'draw') room.finish('draw', '판이 가득 참');
+      room.gomoku = next; room.drawOffer = null;
+      if (next.status === 'won') this.finish(room, conn.side, '5목 완성');
+      else if (next.status === 'draw') this.finish(room, 'draw', '판이 가득 참');
     }
     room.broadcast();
   }
@@ -139,12 +244,14 @@ export class RoomManager {
     if (room.status !== 'playing' || !room.clocks) return false;
     const side = room.turn;
     if (room.clocks[side] - (this.now() - room.turnStart) <= 0) {
-      room.clocks[side] = 0; room.finish(side === 'w' ? 'b' : 'w', '시간 초과'); return true;
+      room.clocks[side] = 0; this.finish(room, side === 'w' ? 'b' : 'w', '시간 초과'); return true;
     }
     return false;
   }
 
   disconnect(conn: Conn) {
+    this.leaveQueue(conn);
+    if (conn.userId !== undefined) { const s = this.users.get(conn.userId); s?.delete(conn); if (s && !s.size) this.users.delete(conn.userId); }
     const room = conn.room; if (!room) return;
     const p = room.players.find((x) => x.conn === conn);
     if (p) { p.conn = null; p.lostAt = this.now(); room.broadcast(); }
@@ -157,7 +264,7 @@ export class RoomManager {
       if (this.checkClock(room)) room.broadcast();
       if (room.status === 'playing') {
         const gone = room.players.find((p) => p.lostAt !== null && t - p.lostAt > FORFEIT_MS);
-        if (gone) { room.finish(gone.side === 'w' ? 'b' : 'w', '상대 연결 끊김'); room.broadcast(); }
+        if (gone) { this.finish(room, gone.side === 'w' ? 'b' : 'w', '상대 연결 끊김'); room.broadcast(); }
       }
       if (t - room.touched > IDLE_MS && room.players.every((p) => !p.conn)) this.rooms.delete(code);
     }
