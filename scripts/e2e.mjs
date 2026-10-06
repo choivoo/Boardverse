@@ -1,5 +1,5 @@
 // E2E (Chromium, mobile/touch emulation). Start the app first:
-//   DATABASE_PATH=:memory: npm run serve        (serves on :8787; use a throwaway DB!)
+//   DATABASE_PATH=:memory: ADMIN_EMAILS=boss@example.com npm run serve   (serves on :8787; use a throwaway DB!)
 // Needs Chromium: $CHROMIUM or /opt/pw-browsers/chromium. SHOTS=dir saves screenshots.
 import { chromium } from 'playwright-core';
 import assert from 'node:assert/strict';
@@ -107,11 +107,116 @@ await run('online: two accounts, rated quick match, rating shown, ranking, repla
   await first.p.getByText(/레이팅 \+20/).waitFor(); await second.p.getByText(/레이팅 -20/).waitFor(); await shot(first.p, 'online-won');
   await first.p.getByRole('button', { name: '홈으로' }).click(); await tab(first.p, '랭킹').click(); await first.p.getByRole('button', { name: '오목' }).click();
   await first.p.getByText(/내 순위: 1위/).waitFor(); await shot(first.p, 'ranking');
-  await tab(first.p, '내 정보').click(); await first.p.getByText(/오목: 1220/).waitFor();
+  await tab(first.p, '내 정보').click(); await first.p.getByText(/오목 · 기본: 1220/).waitFor();
   await first.p.getByRole('button', { name: '복기' }).first().click(); await first.p.getByText('9 / 9수').waitFor();
   await A.ctx.close(); await B.ctx.close();
 });
 
+
+// ---------- helpers for the platform scenarios ----------
+const signup = async (vp, name, email = `${name}@example.com`) => {
+  const ctx = await mk(vp); const p = await ctx.newPage(); const errs = []; p.on('pageerror', (e) => errs.push(e.message));
+  await p.goto(URL_); await p.getByRole('button', { name: '로그인' }).first().click(); await p.getByRole('button', { name: '계정 만들기' }).click();
+  await p.getByLabel('이메일').fill(email); await p.getByLabel(/^닉네임/).fill(name); await p.getByLabel(/^비밀번호/).fill('password123');
+  await p.getByRole('button', { name: '가입하기' }).click(); await p.getByRole('heading', { name }).waitFor();
+  await noOverflow(p, `profile of ${name}`); // long nicknames must not widen the page
+  return { ctx, p, name, errs };
+};
+const outbox = async (p) => (await (await p.request.get(`${URL_}/api/dev/outbox`)).json()).outbox;
+const verifyEmail = async (u, email = `${u.name}@example.com`) => {
+  const mail = (await outbox(u.p)).filter((m) => m.to === email && m.subject.includes('인증')).at(-1);
+  await u.p.goto(`${URL_}/?verify=${mail.text.match(/verify=([\w-]+)/)[1]}`); await u.p.getByText('이메일이 인증되었습니다.').waitFor();
+};
+const A = `adm${uid}`; let boss;
+
+await run('email: dev outbox banner, verify link (one-time), forgot/reset password flow', async () => {
+  const u = await signup(VPS.cover, `em${uid}`);
+  await u.p.getByText('이메일이 아직 인증되지 않았습니다.').waitFor(); await u.p.getByText(/개발 모드: 메일은 실제로 발송되지 않고/).waitFor();
+  const mail = (await outbox(u.p)).filter((m) => m.to === `em${uid}@example.com`).at(-1); const tok = mail.text.match(/verify=([\w-]+)/)[1];
+  await u.p.goto(`${URL_}/?verify=${tok}`); await u.p.getByText('이메일이 인증되었습니다.').waitFor();
+  await u.p.goto(`${URL_}/?verify=${tok}`); await u.p.getByText(/만료되었거나 이미 사용/).waitFor(); // second use rejected
+  await u.p.goto(URL_); await tab(u.p, '내 정보').click(); await u.p.getByRole('button', { name: '로그아웃' }).click();
+  await u.p.getByRole('button', { name: '로그인' }).first().click(); await u.p.getByRole('button', { name: '비밀번호를 잊었나요?' }).click();
+  await u.p.getByLabel('가입 이메일').fill(`em${uid}@example.com`); await u.p.getByRole('button', { name: '재설정 링크 받기' }).click(); await u.p.getByText(/계정이 있다면 재설정 링크를 보냈습니다/).waitFor();
+  const rt = (await outbox(u.p)).filter((m) => m.subject.includes('재설정')).at(-1).text.match(/reset=([\w-]+)/)[1];
+  await u.p.goto(`${URL_}/?reset=${rt}`); await u.p.getByLabel(/^새 비밀번호/).fill('brandnewpass1'); await u.p.getByRole('button', { name: '변경', exact: true }).click(); await u.p.getByText(/변경되었습니다/).waitFor();
+  await u.p.getByRole('button', { name: '로그인으로' }).click(); await u.p.getByLabel('이메일').fill(`em${uid}@example.com`); await u.p.getByLabel(/^비밀번호/).fill('brandnewpass1');
+  await u.p.locator('#main').getByRole('button', { name: '로그인', exact: true }).click(); await u.p.getByRole('heading', { name: `em${uid}` }).waitFor();
+  assert.equal(u.errs.length, 0, u.errs.join()); await u.ctx.close();
+});
+
+await run('service worker never serves /api from cache (offline)', async () => {
+  const u = await signup(VPS.cover, `sw${uid}`);
+  await u.p.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await u.p.reload(); await u.p.evaluate(() => fetch('/api/me').then((r) => r.json())); // warm: would be cached by a naive SW
+  await u.ctx.setOffline(true);
+  const r = await u.p.evaluate(() => fetch('/api/me').then(() => 'served', () => 'failed'));
+  assert.equal(r, 'failed', 'api response must not come from the SW cache'); await u.ctx.setOffline(false); await u.ctx.close();
+});
+
+await run('admin: unverified admin email has no access; verified admin triages report; audit log; non-admin blocked', async () => {
+  boss = await signup(VPS.inner, A, 'boss@example.com'); const bad = await signup(VPS.cover, `bad${uid}`);
+  await tab(boss.p, '내 정보').click(); assert.equal(await boss.p.getByRole('button', { name: '관리자' }).count(), 0, 'no admin button before verification');
+  assert.equal((await boss.p.request.get(`${URL_}/api/admin/reports`)).status(), 403);
+  await verifyEmail(boss, 'boss@example.com'); await boss.p.goto(URL_); await tab(boss.p, '내 정보').click(); await boss.p.getByRole('button', { name: '관리자' }).click();
+  // another user reports "bad"
+  const rep = await signup(VPS.cover, `rep${uid}`);
+  assert.equal((await rep.p.request.post(`${URL_}/api/report`, { data: { name: `bad${uid}`, reason: '욕설을 계속합니다 password: supersecret99' } })).status(), 200);
+  assert.equal((await bad.p.request.get(`${URL_}/api/admin/reports`)).status(), 403);
+  await boss.p.getByRole('button', { name: '새로고침' }).click(); await boss.p.getByText(/욕설을 계속합니다/).waitFor();
+  assert.equal(await boss.p.getByText('supersecret99').count(), 0, 'secrets redacted');
+  boss.p.once('dialog', (d) => d.accept('경고 조치')); await boss.p.locator('article').getByRole('button', { name: '조치 완료' }).first().click(); await boss.p.getByText(/메모: 경고 조치/).waitFor({ timeout: 8000 }).catch(async (e) => { await shot(boss.p, 'admin-fail'); throw e; });
+  await boss.p.getByRole('button', { name: '감사 로그' }).click(); await boss.p.getByText('handle_report').waitFor(); await boss.p.getByText('view_reports').first().waitFor();
+  await shot(boss.p, 'admin'); for (const u of [bad, rep]) await u.ctx.close();
+});
+
+await run('tournament: admin creates, two players join/queue/play, standings + elo untouched', async () => {
+  const adm = boss; await adm.p.goto(URL_); await tab(adm.p, '내 정보').click(); await adm.p.getByRole('button', { name: '대회' }).click();
+  await adm.p.getByLabel('이름').fill(`아레나${uid}`); await adm.p.getByLabel('몇 분 뒤 시작').fill('0'); await adm.p.getByLabel(/^진행 시간/).fill('30'); await adm.p.getByRole('button', { name: '만들기' }).click();
+  await adm.p.getByRole('button', { name: `아레나${uid}` }).waitFor();
+  const P = [await signup(VPS.cover, `ta${uid}`), await signup(VPS.cover, `tc${uid}`)];
+  for (const u of P) { u.p.on('dialog', (d) => d.accept()); await tab(u.p, '플레이').click(); await u.p.getByRole('button', { name: '대회', exact: true }).click(); await u.p.getByRole('button', { name: `아레나${uid}` }).click(); await u.p.getByRole('button', { name: '참가', exact: true }).click(); await u.p.getByRole('button', { name: '경기 찾기' }).waitFor(); }
+  for (const u of P) await u.p.getByRole('button', { name: '경기 찾기' }).click();
+  for (const u of P) await u.p.getByRole('grid', { name: '오목판' }).waitFor();
+  await P[1].p.getByRole('button', { name: '기권' }).click();
+  for (const u of P) await u.p.getByRole('alertdialog').waitFor();
+  assert.equal(await P[1].p.getByText(/레이팅 [+-]\d/).count(), 0, 'tournament games show no rating change'); await P[1].p.getByText(/대회 경기는 레이팅에 반영되지 않고/).waitFor();
+  for (const u of P) { await u.p.getByRole('button', { name: '홈으로' }).click(); await tab(u.p, '플레이').click(); await u.p.getByRole('button', { name: '대회', exact: true }).click(); await u.p.getByRole('button', { name: `아레나${uid}` }).click(); }
+  await P[0].p.getByRole('cell', { name: '2', exact: true }).first().waitFor(); await shot(P[0].p, 'tournament');
+  for (const u of P) await u.ctx.close();
+});
+
+await run('clubs: create, join, request/approve flow, roles', async () => {
+  const o = await signup(VPS.cover, `co${uid}`), m = await signup(VPS.inner, `cm${uid}`);
+  await tab(o.p, '플레이').click(); await o.p.getByRole('button', { name: '클럽', exact: true }).click();
+  await o.p.getByLabel(/^이름/).fill(`클럽${uid}`); await o.p.getByLabel(/^소개/).fill('테스트'); await o.p.getByLabel(/누구나 바로 가입/).uncheck(); await o.p.getByRole('button', { name: '만들기' }).click();
+  await o.p.getByRole('heading', { name: `클럽${uid}` }).waitFor();
+  await tab(m.p, '플레이').click(); await m.p.getByRole('button', { name: '클럽', exact: true }).click(); await m.p.getByRole('button', { name: `클럽${uid}` }).click();
+  await m.p.getByRole('button', { name: '가입 요청' }).click(); await m.p.getByRole('button', { name: '요청 취소' }).waitFor();
+  await o.p.reload(); await tab(o.p, '플레이').click(); await o.p.getByRole('button', { name: '클럽', exact: true }).click(); await o.p.getByRole('button', { name: `클럽${uid}` }).first().click();
+  await o.p.getByText(`cm${uid}`).waitFor(); await o.p.getByRole('button', { name: '수락' }).click(); await o.p.getByRole('button', { name: '관리자 지정' }).waitFor(); await shot(o.p, 'club');
+  assert.equal(o.errs?.length ?? 0, 0); await o.ctx.close(); await m.ctx.close();
+});
+
+await run('spectate + chat: live list, read-only view, chat between players, muting', async () => {
+  const [a, b, v] = [await signup(VPS.cover, `sa${uid}`), await signup(VPS.inner, `sb${uid}`), await signup(VPS.cover, `sv${uid}`)];
+  for (const u of [a, b]) { await tab(u.p, '플레이').click(); await u.p.getByRole('button', { name: '온라인으로 하기' }).click(); await u.p.getByRole('radio', { name: '오목' }).check(); await u.p.getByRole('radio', { name: '15×15' }).check(); }
+  await a.p.getByRole('button', { name: '상대 찾기' }).click(); await b.p.getByRole('button', { name: '상대 찾기' }).click();
+  for (const u of [a, b]) await u.p.getByRole('grid', { name: '오목판' }).waitFor();
+  await a.p.getByLabel('채팅 메시지').fill('안녕하세요!'); await a.p.getByRole('button', { name: '보내기' }).click();
+  await b.p.getByText('안녕하세요!').waitFor(); await a.p.getByText('안녕하세요!').waitFor();
+  await b.p.getByLabel('채팅 메시지').fill('http://spam.example'); await b.p.getByRole('button', { name: '보내기' }).click(); await b.p.getByText(/링크는 보낼 수 없습니다/).waitFor().catch(() => {});
+  await b.p.getByLabel(/상대 채팅 숨기기/).check(); await b.p.getByText('상대 채팅을 숨겼습니다.').waitFor();
+  await tab(v.p, '플레이').click(); await v.p.getByRole('button', { name: '관전', exact: true }).click(); await v.p.getByRole('button', { name: '관전', exact: true }).nth(0).waitFor();
+  await v.p.getByText(new RegExp(`sa${uid} vs sb${uid}|sb${uid} vs sa${uid}`)).waitFor(); await v.p.getByRole('listitem').getByRole('button', { name: '관전' }).first().click();
+  await v.p.getByRole('grid', { name: '오목판' }).waitFor(); await v.p.getByText('읽기 전용 관전 화면입니다.').waitFor(); assert.equal(await v.p.getByRole('button', { name: '기권' }).count(), 0); assert.equal(await v.p.getByLabel('채팅 메시지').count(), 0); assert.equal(await v.p.getByRole('button', { name: '착수', exact: true }).count(), 0, 'no move controls for spectators');
+  const first = (await a.p.getByText('내 차례').count()) ? a : b;
+  await first.p.locator('[data-x="0"][data-y="0"]').tap(); await first.p.getByRole('button', { name: '착수', exact: true }).tap();
+  await v.p.getByText(/관전 중 ·/).waitFor(); await v.p.locator('.stone').first().waitFor(); await shot(v.p, 'spectator');
+  for (const u of [a, b, v]) await u.ctx.close();
+});
+
+await boss?.ctx.close();
 await run('manifest + healthz + security headers', async () => {
   const r = await (await b.newContext()).newPage();
   const res = await r.request.get(`${URL_}/manifest.webmanifest`); assert(res.ok()); assert((await res.json()).icons.length >= 2);

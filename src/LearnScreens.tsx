@@ -131,7 +131,7 @@ export function ReplayView({ data, back }: { data: ReplayData; back: () => void 
     <section className="play">
       <div className="boardcol">
         {chess && <ChessBoard game={chess.g} flip={false} sel={null} targets={[]} last={chess.last} onSquare={() => {}} />}
-        {gomoku && <GomokuBoard size={gomoku.size} board={gomoku.board} lastIdx={gomoku.moves.at(-1)} winLine={k === data.moves.length ? gomoku.winLine : []} disabled onPlace={() => {}} />}
+        {gomoku && <GomokuBoard size={gomoku.size} board={gomoku.board} lastIdx={gomoku.moves.at(-1)} winLine={k === data.moves.length ? gomoku.winLine : []} disabled readOnly onPlace={() => {}} />}
       </div>
       <aside className="side">
         <h2>{data.title}</h2>

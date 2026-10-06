@@ -7,7 +7,8 @@ import { GOMOKU_RULE_LABEL } from './games/gomoku';
 import { OnlineScreen } from './OnlineScreen';
 import { AccountProvider, useAccount } from './api';
 import { OnlineProvider, useOnline, hasSavedRoom } from './online';
-import { AuthScreen, FriendsScreen, LeaderboardScreen, ProfileScreen, PublicProfile, SeasonScreen, ShopScreen } from './AccountScreens';
+import { AdminScreen, ClubDetail, ClubsScreen, LiveScreen, TournamentDetail, TournamentsScreen } from './Community';
+import { AuthScreen, EmailLinkScreen, ForgotScreen, PasswordScreen, FriendsScreen, LeaderboardScreen, ProfileScreen, PublicProfile, SeasonScreen, ShopScreen } from './AccountScreens';
 import { LearnHome, PuzzleList, PuzzlePlay, ReplayHub, ReplayView, loadProg, type ReplayData } from './LearnScreens';
 import { dailyPuzzle, PUZZLE_TITLE } from './puzzles';
 import { seasonAt } from './seasons';
@@ -19,9 +20,11 @@ type Screen =
   | { name: 'home' } | { name: 'play' } | { name: 'setup'; game: 'chess' | 'gomoku'; opp: Opp } | { name: 'game'; setup: Setup }
   | { name: 'online'; code?: string } | { name: 'learn' } | { name: 'puzzles' } | { name: 'puzzle'; id: string }
   | { name: 'replayhub'; serverGame?: string } | { name: 'replay'; data: ReplayData } | { name: 'help' } | { name: 'ranking' }
+  | { name: 'tournaments' } | { name: 'tournament'; id: number } | { name: 'clubs' } | { name: 'club'; id: number } | { name: 'live' } | { name: 'admin' }
+  | { name: 'password' } | { name: 'forgot' } | { name: 'emaillink'; kind: 'verify' | 'reset'; token: string }
   | { name: 'me' } | { name: 'auth' } | { name: 'shop' } | { name: 'season' } | { name: 'friends' } | { name: 'user'; who: string };
 
-const TAB: Record<string, string> = { home: 'home', play: 'play', setup: 'play', game: 'play', online: 'play', learn: 'learn', puzzles: 'learn', puzzle: 'learn', replayhub: 'learn', replay: 'learn', help: 'learn', ranking: 'ranking', me: 'me', auth: 'me', shop: 'me', season: 'me', friends: 'me', user: 'ranking' };
+const TAB: Record<string, string> = { home: 'home', play: 'play', setup: 'play', game: 'play', online: 'play', learn: 'learn', puzzles: 'learn', puzzle: 'learn', replayhub: 'learn', replay: 'learn', help: 'learn', ranking: 'ranking', me: 'me', auth: 'me', shop: 'me', season: 'me', friends: 'me', user: 'ranking', tournaments: 'play', tournament: 'play', clubs: 'play', club: 'play', live: 'play', admin: 'me', password: 'me', forgot: 'me', emaillink: 'me' };
 const LEVELS = [{ v: 1, l: '초급' }, { v: 2, l: '보통' }, { v: 3, l: '어려움' }] as const;
 const LEVEL_TEXT: Record<'chess' | 'gomoku', Record<number, string>> = {
   chess: { 1: '무작위 합법 수를 둡니다.', 2: '한 수 앞의 기물 득실만 봅니다.', 3: '상대 응수까지 두 수 앞을 봅니다. (강한 엔진이 아닙니다)' },
@@ -35,7 +38,10 @@ export function App() {
 function Shell() {
   const acct = useAccount();
   const [screen, setScreen] = useState<Screen>(() => {
-    const code = new URLSearchParams(location.search).get('room')?.toUpperCase().slice(0, 5);
+    const qs = new URLSearchParams(location.search);
+    const verify = qs.get('verify'), reset = qs.get('reset');
+    if (verify || reset) { history.replaceState(null, '', '/'); return { name: 'emaillink', kind: verify ? 'verify' : 'reset', token: (verify ?? reset)!.slice(0, 80) }; }
+    const code = qs.get('room')?.toUpperCase().slice(0, 5);
     return code || hasSavedRoom() ? { name: 'online', code } : { name: 'home' };
   });
   const [round, setRound] = useState(0);
@@ -82,8 +88,17 @@ function Frame({ screen, go, home, round, again }: { screen: Screen; go: (s: Scr
         {screen.name === 'help' && <Help back={() => go({ name: 'learn' })} />}
         {screen.name === 'ranking' && <LeaderboardScreen profile={(who) => go({ name: 'user', who })} />}
         {screen.name === 'user' && <PublicProfile name={screen.who} back={() => go({ name: 'ranking' })} />}
-        {screen.name === 'me' && <ProfileScreen go={(t) => go({ name: t })} replay={(id) => go({ name: 'replayhub', serverGame: id })} />}
-        {screen.name === 'auth' && <AuthScreen done={() => go({ name: 'me' })} />}
+        {screen.name === 'me' && <ProfileScreen go={(t) => go({ name: t } as Screen)} replay={(id) => go({ name: 'replayhub', serverGame: id })} />}
+        {screen.name === 'auth' && <AuthScreen done={() => go({ name: 'me' })} forgot={() => go({ name: 'forgot' })} />}
+        {screen.name === 'forgot' && <ForgotScreen back={toAuth} />}
+        {screen.name === 'password' && <PasswordScreen back={() => go({ name: 'me' })} />}
+        {screen.name === 'emaillink' && <EmailLinkScreen kind={screen.kind} token={screen.token} done={() => go(screen.kind === 'verify' ? { name: 'me' } : { name: 'auth' })} />}
+        {screen.name === 'tournaments' && <TournamentsScreen open={(id) => go({ name: 'tournament', id })} login={toAuth} />}
+        {screen.name === 'tournament' && <TournamentDetail id={screen.id} back={() => go({ name: 'tournaments' })} login={toAuth} play={(tid) => o.send({ t: 'queue', game: 'gomoku', name: acct.user?.name ?? '', tournament: tid })} />}
+        {screen.name === 'clubs' && <ClubsScreen open={(id) => go({ name: 'club', id })} login={toAuth} />}
+        {screen.name === 'club' && <ClubDetail id={screen.id} back={() => go({ name: 'clubs' })} login={toAuth} />}
+        {screen.name === 'live' && <LiveScreen watch={(code) => { o.send({ t: 'watch', code }); go({ name: 'online' }); }} />}
+        {screen.name === 'admin' && <AdminScreen />}
         {screen.name === 'shop' && <ShopScreen login={toAuth} />}
         {screen.name === 'season' && <SeasonScreen login={toAuth} />}
         {screen.name === 'friends' && <FriendsScreen login={toAuth} profile={(who) => go({ name: 'user', who })} />}
@@ -143,6 +158,7 @@ function PlayHub({ go }: { go: (s: Screen) => void }) {
       <h1>플레이</h1>
       <div className="cards">
         <article className="card"><h2>🌐 온라인</h2><p>빠른 매칭, 친구 방 코드, 평가 대국(로그인).</p><button className="primary" onClick={() => go({ name: 'online' })}>온라인으로 하기</button></article>
+        <article className="card"><h2>🏅 대회 · 👥 클럽 · 👀 관전</h2><p>아레나 대회에 참가하거나, 클럽에 가입하거나, 진행 중인 대국을 읽기 전용으로 구경하세요.</p><div className="row"><button onClick={() => go({ name: 'tournaments' })}>대회</button><button onClick={() => go({ name: 'clubs' })}>클럽</button><button onClick={() => go({ name: 'live' })}>관전</button></div></article>
         {(['chess', 'gomoku'] as const).map((g) => (
           <article className="card" key={g}><h2>{GAME_NAME[g]} 연습</h2><p>인터넷 없이도 가능합니다.</p>
             <div className="row"><button onClick={() => go({ name: 'setup', game: g, opp: 'bot' })}>컴퓨터와</button><button onClick={() => go({ name: 'setup', game: g, opp: 'local' })}>같은 기기 2인</button></div></article>))}

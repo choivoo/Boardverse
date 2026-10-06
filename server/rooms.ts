@@ -4,11 +4,16 @@ import { newGomoku, playGomoku, type GomokuState } from '../src/games/gomoku';
 import { chessEnd, TIME_CONTROLS } from '../src/games/chess';
 import type { ClientMsg, RoomView, ServerMsg, Side, GameKind } from '../src/protocol';
 import type { GameSummary } from './store';
+import { catOf } from './store';
 
-export interface Conn { send(m: ServerMsg): void; room?: Room; side?: Side; userId?: number; userName?: string; queued?: boolean }
+export interface Conn { send(m: ServerMsg): void; room?: Room; side?: Side; userId?: number; userName?: string; queued?: boolean; watching?: Room; chatTimes?: number[] }
 export interface Hooks {
   blocked?(a: number, b: number): boolean;
-  rating?(userId: number, game: GameKind): number;
+  /** false when rated play requires a verified email that the user lacks */
+  canRate?(userId: number): boolean;
+  rating?(userId: number, game: GameKind, cat: string): number;
+  /** Returns the tournament's fixed settings if the user may queue for it right now, else an error string. */
+  tournament?(tid: number, userId: number): { game: GameKind; time: string; size: number } | string;
   isFriend?(a: number, b: number): boolean;
   userByName?(name: string): { id: number } | undefined;
   record?(g: GameSummary): { w: number; b: number } | null;
@@ -16,7 +21,9 @@ export interface Hooks {
 interface Player { token: string; name: string; side: Side; userId: number | null; conn: Conn | null; lostAt: number | null }
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const FORFEIT_MS = 120_000, IDLE_MS = 30 * 60_000, MAX_ROOMS = 1000, MAX_QUEUE = 500, RATING_WINDOW = 400;
-interface Opts { game: GameKind; time: string; size: number; rated: boolean }
+interface Opts { game: GameKind; time: string; size: number; rated: boolean; spectate: boolean; tid?: number }
+const MAX_SPECTATORS = 20, CHAT_MAX = 200;
+const URL_RE = /(https?:|www\.|[a-z0-9-]+\.(com|net|org|io|kr|co|me|gg|xyz)\b)/i;
 
 export class Room {
   players: Player[] = [];
@@ -26,20 +33,21 @@ export class Room {
   gomoku?: GomokuState;
   clocks: { w: number; b: number } | null = null; turnStart = 0; incMs = 0;
   drawOffer: Side | null = null; rematch = new Set<Side>(); recorded = false;
+  spectators = new Set<Conn>(); chat: { name: string; side: Side; text: string; at: number }[] = [];
   touched: number; id: string;
   constructor(public code: string, public opts: Opts, now: number) { this.touched = now; this.id = `${code}-${now.toString(36)}-${randomInt(1e6).toString(36)}`; }
   get game() { return this.opts.game; }
   get n() { return this.game === 'chess' ? this.chess!.history().length : this.gomoku!.moves.length; }
   get turn(): Side { return this.game === 'chess' ? this.chess!.turn() : this.gomoku!.turn === 'B' ? 'w' : 'b'; }
   moveList(): string[] { return this.game === 'chess' ? this.chess!.history() : this.gomoku!.moves.map(String); }
-  view(you: Side): RoomView {
-    const v: RoomView = { code: this.code, game: this.game, status: this.status, rated: this.opts.rated, time: this.opts.time, drawOffer: this.drawOffer, rematch: [...this.rematch], you, n: this.n, turn: this.turn, result: this.result,
+  view(you: Side, spectator = false): RoomView {
+    const v: RoomView = { code: this.code, spectators: this.spectators.size, spectate: this.opts.spectate, spectator: spectator || undefined, tournament: this.opts.tid, chat: spectator ? undefined : this.chat.slice(-30), game: this.game, status: this.status, rated: this.opts.rated, time: this.opts.time, drawOffer: this.drawOffer, rematch: [...this.rematch], you, n: this.n, turn: this.turn, result: this.result,
       players: this.players.map((p) => ({ name: p.name, side: p.side, connected: !!p.conn, registered: p.userId !== null })) };
     if (this.chess) v.chess = { fen: this.chess.fen(), history: this.chess.history(), last: this.lastMove, clocks: this.clocks && { ...this.clocks }, running: this.status === 'playing' && this.clocks ? this.turn : null };
     if (this.gomoku) v.gomoku = { size: this.gomoku.size, board: this.gomoku.board, moves: this.gomoku.moves, winLine: this.gomoku.winLine };
     return v;
   }
-  broadcast() { for (const p of this.players) p.conn?.send({ t: 'view', view: this.view(p.side) }); }
+  broadcast() { for (const p of this.players) p.conn?.send({ t: 'view', view: this.view(p.side) }); for (const c of this.spectators) c.send({ t: 'view', view: this.view('w', true) }); }
 }
 
 function cleanName(s: unknown): string {
@@ -67,12 +75,14 @@ export class RoomManager {
     }
     return null;
   }
-  private parseOpts(m: { game: GameKind; time?: string; size?: number; rated?: boolean }, conn: Conn): Opts | string {
+  private parseOpts(m: { game: GameKind; time?: string; size?: number; rated?: boolean; spectate?: boolean }, conn: Conn, spectateDefault = false): Opts | string {
     if (m.game !== 'chess' && m.game !== 'gomoku') return '지원하지 않는 게임입니다.';
     const rated = !!m.rated;
     if (rated && conn.userId === undefined) return '평가 대국은 로그인이 필요합니다.';
+    if (rated && this.hooks.canRate && !this.hooks.canRate(conn.userId!)) return '평가 대국은 이메일 인증 후 이용할 수 있습니다.';
     const tc = m.game === 'chess' ? TIME_CONTROLS.find((t) => t.id === m.time) ?? TIME_CONTROLS[0] : TIME_CONTROLS[0];
-    return { game: m.game, time: tc.id, size: m.game === 'gomoku' && [13, 15, 19].includes(m.size as number) ? (m.size as number) : 15, rated };
+    // rated games are never spectatable (no live relay of an ongoing rated game)
+    return { game: m.game, time: tc.id, size: m.game === 'gomoku' && [13, 15, 19].includes(m.size as number) ? (m.size as number) : 15, rated, spectate: !rated && (m.spectate ?? spectateDefault) };
   }
   private makeRoom(o: Opts): Room | null {
     if (this.rooms.size >= MAX_ROOMS) return null;
@@ -112,6 +122,9 @@ export class RoomManager {
         return;
       }
       case 'queue': return this.enqueue(conn, m, err);
+      case 'watch': return this.watch(conn, m.code, err);
+      case 'unwatch': this.unwatch(conn); return;
+      case 'chat': return this.chat(conn, m.text, err);
       case 'unqueue': this.leaveQueue(conn); conn.send({ t: 'unqueued' }); return;
       case 'resume': {
         const room = this.rooms.get(String(m.code ?? '').toUpperCase());
@@ -154,11 +167,17 @@ export class RoomManager {
   // ---- matchmaking ----
   private enqueue(conn: Conn, m: Extract<ClientMsg, { t: 'queue' }>, err: (s: string) => void) {
     if (conn.room && conn.room.status !== 'over') return err('이미 대국 중입니다.');
-    const o = this.parseOpts(m, conn); if (typeof o === 'string') return err(o);
+    let o = this.parseOpts(m, conn, true); if (typeof o === 'string') return err(o); // quick-match games are watchable unless the player opts out
+    if (m.tournament !== undefined) {
+      if (conn.userId === undefined) return err('대회는 로그인이 필요합니다.');
+      const t = this.hooks.tournament?.(Number(m.tournament), conn.userId);
+      if (!t || typeof t === 'string') return err(t || '대회에 참가할 수 없습니다.');
+      o = { game: t.game, time: t.time, size: t.size, rated: false, spectate: m.spectate ?? true, tid: Number(m.tournament) };
+    }
     this.leaveQueue(conn);
     if (this.queue.length >= MAX_QUEUE) return err('대기열이 가득 찼습니다.');
-    const rating = conn.userId !== undefined ? this.hooks.rating?.(conn.userId, o.game) ?? 1200 : 1200;
-    const same = (a: Opts, b: Opts) => a.game === b.game && a.time === b.time && a.size === b.size && a.rated === b.rated;
+    const rating = conn.userId !== undefined ? this.hooks.rating?.(conn.userId, o.game, catOf(o.game, o.time)) ?? 1200 : 1200;
+    const same = (a: Opts, b: Opts) => a.game === b.game && a.time === b.time && a.size === b.size && a.rated === b.rated && a.tid === b.tid;
     const idx = this.queue.findIndex((q) => same(q.opts, o) && q.conn !== conn
       && !(conn.userId !== undefined && q.conn.userId === conn.userId)
       && !(conn.userId !== undefined && q.conn.userId !== undefined && this.hooks.blocked?.(conn.userId, q.conn.userId))
@@ -185,6 +204,49 @@ export class RoomManager {
     this.start(next);
     this.rooms.delete(room.code);
   }
+  // ---- spectating (read-only) ----
+  private watch(conn: Conn, code: string, err: (s: string) => void) {
+    const room = this.rooms.get(String(code ?? '').toUpperCase());
+    if (!room || !room.opts.spectate || room.status === 'waiting') return err('관전할 수 없는 대국입니다.');
+    if (conn.room) return err('대국 중에는 관전할 수 없습니다.');
+    if (room.spectators.size >= MAX_SPECTATORS) return err('관전 인원이 가득 찼습니다.');
+    this.unwatch(conn);
+    if (conn.userId !== undefined && room.players.some((p) => p.userId !== null && this.hooks.blocked?.(conn.userId!, p.userId))) return err('이 대국은 관전할 수 없습니다.');
+    room.spectators.add(conn); conn.watching = room;
+    conn.send({ t: 'view', view: room.view('w', true) });
+    room.broadcast();
+  }
+  private unwatch(conn: Conn) { const r = conn.watching; if (r) { r.spectators.delete(conn); conn.watching = undefined; r.broadcast(); } }
+  /** Public list of live games that allow spectators. */
+  live() {
+    return [...this.rooms.values()].filter((r) => r.opts.spectate && r.status === 'playing').slice(0, 50)
+      .map((r) => ({ code: r.code, game: r.game, time: r.opts.time, n: r.n, spectators: r.spectators.size, players: r.players.map((p) => p.name) }));
+  }
+
+  // ---- in-game chat (players only, registered users, text only) ----
+  private chat(conn: Conn, text: string, err: (s: string) => void) {
+    const room = conn.room;
+    if (!room || !conn.side) return err('대국 중에만 채팅할 수 있습니다.');
+    if (conn.userId === undefined) return err('채팅은 로그인한 사용자만 사용할 수 있습니다.');
+    text = String(text ?? '').replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    if (text.length > CHAT_MAX) return err(`메시지는 ${CHAT_MAX}자 이하여야 합니다.`);
+    if (URL_RE.test(text)) return err('링크는 보낼 수 없습니다.');
+    const t = this.now(); const times = (conn.chatTimes ??= []).filter((x) => t - x < 10_000);
+    if (times.length >= 5 || (times.length && t - times[times.length - 1] < 1000)) { conn.chatTimes = times; return err('메시지를 너무 빨리 보내고 있습니다.'); }
+    times.push(t); conn.chatTimes = times;
+    const me = room.players.find((p) => p.conn === conn)!;
+    const msg = { name: me.name, side: conn.side, text, at: t };
+    room.chat.push(msg); if (room.chat.length > 50) room.chat.shift();
+    for (const p of room.players) p.conn?.send({ t: 'chat', ...msg });
+  }
+  /** Last chat lines of a room, only for one of its registered participants (used as report evidence). */
+  chatContextFor(userId: number, code: string): string | null {
+    const room = this.rooms.get(String(code ?? '').toUpperCase());
+    if (!room || !room.players.some((p) => p.userId === userId)) return null;
+    return room.chat.slice(-20).map((c) => `${c.name}: ${c.text}`).join('\n');
+  }
+
   private invite(conn: Conn, to: string, err: (s: string) => void) {
     const room = conn.room;
     if (conn.userId === undefined) return err('초대는 로그인이 필요합니다.');
@@ -204,7 +266,7 @@ export class RoomManager {
     room.recorded = true;
     const w = room.players.find((p) => p.side === 'w')!, b = room.players.find((p) => p.side === 'b')!;
     const delta = this.hooks.record({ id: room.id, game: room.game, whiteId: w.userId, blackId: b.userId, whiteName: w.name, blackName: b.name,
-      rated: room.opts.rated, time: room.opts.time, result: winner, reason, moves: room.moveList() });
+      rated: room.opts.rated, time: room.opts.time, result: winner, reason, moves: room.moveList(), tid: room.opts.tid ?? null });
     if (delta && room.opts.rated) room.result.ratingDelta = delta;
   }
 
@@ -250,7 +312,7 @@ export class RoomManager {
   }
 
   disconnect(conn: Conn) {
-    this.leaveQueue(conn);
+    this.leaveQueue(conn); this.unwatch(conn);
     if (conn.userId !== undefined) { const s = this.users.get(conn.userId); s?.delete(conn); if (s && !s.size) this.users.delete(conn.userId); }
     const room = conn.room; if (!room) return;
     const p = room.players.find((x) => x.conn === conn);

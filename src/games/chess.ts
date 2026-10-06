@@ -6,10 +6,15 @@ export type ChessEnd = { over: false } | { over: true; result: 'w' | 'b' | 'draw
 export interface TimeControl { id: string; label: string; baseSec: number; incSec: number }
 export const TIME_CONTROLS: TimeControl[] = [
   { id: 'none', label: '무제한', baseSec: 0, incSec: 0 },
+  { id: '1+0', label: '1분', baseSec: 60, incSec: 0 },
+  { id: '3+0', label: '3분', baseSec: 180, incSec: 0 },
   { id: '5+0', label: '5분', baseSec: 300, incSec: 0 },
   { id: '10+0', label: '10분', baseSec: 600, incSec: 0 },
   { id: '15+10', label: '15분 + 10초', baseSec: 900, incSec: 10 },
 ];
+
+import { ratingCat } from '../ratingConfig';
+export const catOfTime = (id: string) => { const t = TIME_CONTROLS.find((x) => x.id === id) ?? TIME_CONTROLS[0]; return ratingCat('chess', t.baseSec, t.incSec); };
 
 export function chessEnd(g: Chess): ChessEnd {
   if (g.isCheckmate()) return { over: true, result: g.turn() === 'w' ? 'b' : 'w', reason: '체크메이트' };

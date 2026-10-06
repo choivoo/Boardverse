@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, useAccount } from './api';
 import { Avatar, GAME_NAME, State, fmtDate, useLoad } from './ui';
 import { ITEMS, ITEM_BY_ID, SLOT_LABEL, type Slot } from './catalog';
 import { SEASONS, CLAIM_GRACE_MS } from './seasons';
 import type { GameKind } from './protocol';
+import { CAT_LABEL, CATS } from './ratingConfig';
 
-export function AuthScreen({ done }: { done: () => void }) {
+export function AuthScreen({ done, forgot }: { done: () => void; forgot: () => void }) {
   const { login, register, status } = useAccount();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [f, setF] = useState({ email: '', name: '', password: '' });
@@ -27,13 +28,13 @@ export function AuthScreen({ done }: { done: () => void }) {
         <label className="field">비밀번호 (8자 이상)<input type="password" required minLength={8} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></label>
         {err && <p className="banner err" role="alert">{err}</p>}
         <div className="row"><button className="primary" disabled={busy}>{mode === 'login' ? '로그인' : '가입하기'}</button>
-          <button type="button" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setErr(null); }}>{mode === 'login' ? '계정 만들기' : '로그인으로'}</button></div>
+          <button type="button" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setErr(null); }}>{mode === 'login' ? '계정 만들기' : '로그인으로'}</button>{mode === 'login' && <button type="button" className="link" onClick={forgot}>비밀번호를 잊었나요?</button>}</div>
       </form>
     </section>
   );
 }
 
-export function ProfileScreen({ go, replay }: { go: (s: 'auth' | 'shop' | 'season' | 'friends') => void; replay: (id: string) => void }) {
+export function ProfileScreen({ go, replay }: { go: (s: 'auth' | 'shop' | 'season' | 'friends' | 'tournaments' | 'clubs' | 'admin' | 'password') => void; replay: (id: string) => void }) {
   const a = useAccount();
   const games = useLoad(() => (a.user ? api<{ games: any[] }>('/api/games') : Promise.resolve({ games: [] })), [a.user?.id]);
   const [msg, setMsg] = useState<string | null>(null);
@@ -51,10 +52,13 @@ export function ProfileScreen({ go, replay }: { go: (s: 'auth' | 'shop' | 'seaso
   return (
     <section>
       <div className="hero"><Avatar name={a.user.name} frame={frame} /><div><h1 style={{ margin: 0 }}>{a.user.name}</h1><p className="coins">🪙 {a.user.coins} 코인 <span className="note">(서버 저장)</span></p></div></div>
-      <div className="row"><button onClick={() => go('shop')}>상점·보관함</button><button onClick={() => go('season')}>시즌</button><button onClick={() => go('friends')}>친구</button></div>
+      <div className="row"><button onClick={() => go('shop')}>상점·보관함</button><button onClick={() => go('season')}>시즌</button><button onClick={() => go('friends')}>친구</button><button onClick={() => go('tournaments')}>대회</button><button onClick={() => go('clubs')}>클럽</button>{a.user.isAdmin && <button onClick={() => go('admin')}>관리자</button>}</div>
+      {!a.user.emailVerified && a.config?.email && <EmailBanner />}
       <h2>레이팅</h2>
-      <ul>{(['chess', 'gomoku'] as const).map((g) => { const r = a.ratings.find((x) => x.game === g); const s = a.stats[g]; return (
-        <li key={g}>{GAME_NAME[g]}: <strong>{r ? r.rating : 1200}</strong>{r ? ` (평가 ${r.games}판)` : ' (평가 대국 없음 · 기본값)'}{s ? ` · ${s.w}승 ${s.d}무 ${s.l}패` : ''}</li>); })}</ul>
+      <p className="note">게임 종류와 시간 분류(체스: 1~3분 미만 불릿 / 8분 미만 블리츠 / 그 이상 래피드, 시계 없음은 무제한)별로 따로 계산됩니다. 평가 대국만 반영됩니다.</p>
+      <ul>{(['chess', 'gomoku'] as const).flatMap((g) => CATS[g].map((c) => { const r = a.ratings.find((x) => x.game === g && x.cat === c); if (!r && c === 'legacy') return null;
+        return <li key={g + c}>{GAME_NAME[g]} · {CAT_LABEL[c]}: <strong>{r ? r.rating : 1200}</strong>{r ? ` (평가 ${r.games}판)` : ' (아직 평가 대국 없음)'}{c === 'legacy' ? ' · 이전 버전 점수, 더 이상 변하지 않음' : ''}</li>; }))}</ul>
+      {Object.entries(a.stats).map(([g, st]) => <p key={g} className="note">{GAME_NAME[g as GameKind]} 전적: {st.w}승 {st.d}무 {st.l}패</p>)}
       <h2>최근 서버 전적</h2>
       <State loading={games.loading} error={games.error} retry={games.reload}>
         {games.data?.games.length ? <ul className="hist">{games.data.games.map((g) => (
@@ -63,7 +67,7 @@ export function ProfileScreen({ go, replay }: { go: (s: 'auth' | 'shop' | 'seaso
       </State>
       <h2>개인정보</h2>
       <label><input type="checkbox" checked={a.user.public} onChange={async (e) => { await api('/api/me', 'PATCH', { public: e.target.checked }); await a.refresh(); }} /> 내 최근 대국을 다른 사람에게 공개</label>
-      <div className="row"><a href="/api/me/export" download><button type="button">내 데이터 내보내기</button></a><button onClick={async () => { await a.logout(); }}>로그아웃</button><button onClick={del}>계정 삭제</button></div>
+      <div className="row"><a href="/api/me/export" download><button type="button">내 데이터 내보내기</button></a><button onClick={() => go('password')}>비밀번호 변경</button><button onClick={async () => { await a.logout(); }}>로그아웃</button><button onClick={del}>계정 삭제</button></div>
       {msg && <p className="banner err" role="alert">{msg}</p>}
     </section>
   );
@@ -132,18 +136,20 @@ export function SeasonScreen({ login }: { login: () => void }) {
 
 export function LeaderboardScreen({ profile }: { profile: (n: string) => void }) {
   const [game, setGame] = useState<GameKind>('chess');
+  const [cat, setCat] = useState('blitz');
   const [page, setPage] = useState(0);
   const per = 20;
-  const d = useLoad(() => api<any>(`/api/leaderboard?game=${game}&offset=${page * per}&limit=${per}`), [game, page]);
+  const d = useLoad(() => api<any>(`/api/leaderboard?game=${game}&cat=${cat}&offset=${page * per}&limit=${per}`), [game, cat, page]);
   return (
     <section>
       <h1>랭킹</h1>
-      <div className="tabsrow" role="group" aria-label="게임">{(['chess', 'gomoku'] as const).map((g) => <button key={g} aria-pressed={game === g} onClick={() => { setGame(g); setPage(0); }}>{GAME_NAME[g]}</button>)}</div>
-      <p className="note">평가 대국(로그인한 두 사람의 대국)만 반영됩니다. 게임 종류별로 분리되어 있고 시간 설정과는 무관한 하나의 레이팅입니다.</p>
+      <div className="tabsrow" role="group" aria-label="게임">{(['chess', 'gomoku'] as const).map((g) => <button key={g} aria-pressed={game === g} onClick={() => { setGame(g); setCat(g === 'chess' ? 'blitz' : 'std'); setPage(0); }}>{GAME_NAME[g]}</button>)}</div>
+      <div className="tabsrow" role="group" aria-label="시간 분류">{CATS[game].map((c) => <button key={c} aria-pressed={cat === c} onClick={() => { setCat(c); setPage(0); }}>{CAT_LABEL[c]}</button>)}</div>
+      <p className="note">평가 대국(로그인한 두 사람의 대국)만 반영되며 게임·시간 분류별로 따로 집계됩니다.</p>
       <State loading={d.loading} error={d.error} retry={d.reload}>
         {d.data?.mine && <p>내 순위: <strong>{d.data.mine.rank}위</strong> · {d.data.mine.rating} ({d.data.mine.games}판)</p>}
         {d.data?.rows.length ? (
-          <table className="table"><caption className="sr">{GAME_NAME[game]} 랭킹</caption><thead><tr><th>순위</th><th>이름</th><th>레이팅</th><th>판</th></tr></thead>
+          <table className="table"><caption className="sr">{GAME_NAME[game]} {CAT_LABEL[cat]} 랭킹</caption><thead><tr><th>순위</th><th>이름</th><th>레이팅</th><th>판</th></tr></thead>
             <tbody>{d.data.rows.map((r: any) => <tr key={r.rank} className={r.me ? 'me' : ''}><td>{r.rank}</td><td><button className="link" onClick={() => profile(r.name)}>{r.name}</button></td><td>{r.rating}</td><td>{r.games}</td></tr>)}</tbody></table>
         ) : <p className="empty">아직 랭킹에 오른 플레이어가 없습니다. 로그인한 친구와 평가 대국을 해 보세요!</p>}
         <div className="row"><button disabled={page === 0} onClick={() => setPage(page - 1)}>이전</button><button disabled={!d.data || (page + 1) * per >= d.data.total} onClick={() => setPage(page + 1)}>다음</button></div>
@@ -190,12 +196,65 @@ export function PublicProfile({ name, back }: { name: string; back: () => void }
       <State loading={d.loading} error={d.error} retry={d.reload}>
         {d.data && <>
           <p>{d.data.online ? <span className="ok">● 온라인</span> : <span className="note">○ 오프라인</span>}</p>
-          <ul>{(['chess', 'gomoku'] as const).map((g) => { const r = d.data.ratings.find((x: any) => x.game === g); return <li key={g}>{GAME_NAME[g]}: {r ? `${r.rating} (${r.games}판)` : '평가 대국 없음'}</li>; })}</ul>
+          <ul>{d.data.ratings.length ? d.data.ratings.map((r: any) => <li key={r.game + r.cat}>{GAME_NAME[r.game as GameKind]} · {CAT_LABEL[r.cat]}: {r.rating} ({r.games}판)</li>) : <li className="note">평가 대국 없음</li>}</ul>
           {d.data.games ? <ul className="hist">{d.data.games.map((g: any) => <li key={g.id}>{GAME_NAME[g.game as GameKind]} · {g.white_name} vs {g.black_name} · {g.result === 'draw' ? '무승부' : g.result === 'w' ? '백/선공 승' : '흑/후공 승'}</li>)}</ul> : <p className="note">대국 기록을 비공개로 설정했습니다.</p>}
           {a.user && a.user.name.toLowerCase() !== name.toLowerCase() && <div className="row"><button onClick={() => act('/api/friends/request')}>친구 요청</button><button onClick={() => act('/api/block')}>차단</button><button onClick={() => { const r = prompt('신고 사유'); if (r) act('/api/report', { reason: r }); }}>신고</button></div>}
         </>}
       </State>
       <button onClick={back}>뒤로</button>
     </section>
+  );
+}
+
+export function EmailBanner() {
+  const a = useAccount(); const [msg, setMsg] = useState<string | null>(null);
+  return (
+    <div className="banner" role="status">
+      <p>이메일이 아직 인증되지 않았습니다.{a.config?.emailRequiredForRated ? ' 평가 대국·대회 참가에는 인증이 필요합니다.' : ''}</p>
+      {a.config?.emailDev && <p className="note">개발 모드: 메일은 실제로 발송되지 않고 서버 메모리의 outbox에만 쌓입니다.</p>}
+      <button onClick={async () => { try { await api('/api/email/send-verification', 'POST', {}); setMsg('인증 메일을 보냈습니다.'); } catch (e) { setMsg((e as Error).message); } }}>인증 메일 보내기</button>
+      {msg && <p className="note">{msg}</p>}
+    </div>
+  );
+}
+
+export function EmailLinkScreen({ kind, token, done }: { kind: 'verify' | 'reset'; token: string; done: () => void }) {
+  const a = useAccount();
+  const [pw, setPw] = useState(''); const [msg, setMsg] = useState<{ t: string; ok?: boolean } | null>(null); const [busy, setBusy] = useState(kind === 'verify');
+  useEffect(() => { if (kind !== 'verify') return; api('/api/email/verify', 'POST', { token }).then(() => { setMsg({ t: '이메일이 인증되었습니다.', ok: true }); a.refresh(); }).catch((e: Error) => setMsg({ t: e.message })).finally(() => setBusy(false)); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  if (kind === 'verify') return <section><h1>이메일 인증</h1>{busy ? <p role="status">확인 중…</p> : <p role="status" className={msg?.ok ? 'ok' : 'err'}>{msg?.t}</p>}<button className="primary" onClick={done}>계속</button></section>;
+  return (
+    <section className="setup"><h1>비밀번호 재설정</h1>
+      <form onSubmit={async (e) => { e.preventDefault(); try { await api('/api/password/reset', 'POST', { token, password: pw }); setMsg({ t: '변경되었습니다. 다시 로그인하세요.', ok: true }); } catch (x) { setMsg({ t: (x as Error).message }); } }}>
+        <label className="field">새 비밀번호 (8자 이상)<input type="password" minLength={8} required autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} /></label>
+        {msg && <p role="status" className={msg.ok ? 'ok' : 'err'}>{msg.t}</p>}
+        <div className="row"><button className="primary">변경</button><button type="button" onClick={done}>로그인으로</button></div>
+      </form></section>
+  );
+}
+
+export function ForgotScreen({ back }: { back: () => void }) {
+  const a = useAccount(); const [email, setEmail] = useState(''); const [msg, setMsg] = useState<string | null>(null); const [err, setErr] = useState<string | null>(null);
+  if (a.config && !a.config.email) return <section><h1>비밀번호 찾기</h1><p className="banner">이 서버에는 이메일 발송(SMTP)이 설정되어 있지 않아 비밀번호 재설정을 사용할 수 없습니다. 운영자에게 문의하세요.</p><button onClick={back}>뒤로</button></section>;
+  return (
+    <section className="setup"><h1>비밀번호 찾기</h1>
+      {a.config?.emailDev && <p className="banner">개발 모드: 메일은 발송되지 않고 서버 outbox에만 기록됩니다.</p>}
+      <form onSubmit={async (e) => { e.preventDefault(); setErr(null); try { await api('/api/password/forgot', 'POST', { email }); setMsg('해당 주소로 가입한 계정이 있다면 재설정 링크를 보냈습니다.'); } catch (x) { setErr((x as Error).message); } }}>
+        <label className="field">가입 이메일<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
+        {msg && <p role="status" className="ok">{msg}</p>}{err && <p role="alert" className="err">{err}</p>}
+        <div className="row"><button className="primary">재설정 링크 받기</button><button type="button" onClick={back}>뒤로</button></div></form></section>
+  );
+}
+
+export function PasswordScreen({ back }: { back: () => void }) {
+  const [f, setF] = useState({ old: '', password: '' }); const [msg, setMsg] = useState<{ t: string; ok?: boolean } | null>(null);
+  return (
+    <section className="setup"><h1>비밀번호 변경</h1>
+      <p className="note">변경하면 다른 기기의 로그인은 모두 해제됩니다.</p>
+      <form onSubmit={async (e) => { e.preventDefault(); try { await api('/api/password/change', 'POST', f); setMsg({ t: '변경되었습니다.', ok: true }); setF({ old: '', password: '' }); } catch (x) { setMsg({ t: (x as Error).message }); } }}>
+        <label className="field">현재 비밀번호<input type="password" required autoComplete="current-password" value={f.old} onChange={(e) => setF({ ...f, old: e.target.value })} /></label>
+        <label className="field">새 비밀번호 (8자 이상)<input type="password" required minLength={8} autoComplete="new-password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></label>
+        {msg && <p role="status" className={msg.ok ? 'ok' : 'err'}>{msg.t}</p>}
+        <div className="row"><button className="primary">변경</button><button type="button" onClick={back}>뒤로</button></div></form></section>
   );
 }

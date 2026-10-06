@@ -40,20 +40,20 @@ describe('ratings', () => {
   it('only rated games between two accounts change ratings, per game kind', () => {
     const { s } = mk(); const a = s.register('a@x.com', 'alice', 'password1'), b = s.register('b@x.com', 'bobby', 'password1');
     expect(s.recordGame(g('u1', a, b, 'w', { rated: false }))).toEqual({ w: 0, b: 0 });
-    expect(s.rating(a, 'chess')).toBe(START_RATING);
+    expect(s.rating(a, 'chess', 'blitz')).toBe(START_RATING);
     const d = s.recordGame(g('r1', a, b, 'w'))!;
     expect(d.w).toBe(20); expect(d.b).toBe(-20);
-    expect(s.rating(a, 'chess')).toBe(1220); expect(s.rating(b, 'chess')).toBe(1180);
-    expect(s.rating(a, 'gomoku')).toBe(START_RATING);
+    expect(s.rating(a, 'chess', 'blitz')).toBe(1220); expect(s.rating(b, 'chess', 'blitz')).toBe(1180);
+    expect(s.rating(a, 'gomoku', 'std')).toBe(START_RATING);
     s.recordGame(g('r2', a, null as never, 'w')); // guest opponent: not rated
-    expect(s.rating(a, 'chess')).toBe(1220);
+    expect(s.rating(a, 'chess', 'blitz')).toBe(1220);
   });
   it('is idempotent per game id and ignores abandoned (<2 moves) games', () => {
     const { s } = mk(); const a = s.register('a@x.com', 'alice', 'password1'), b = s.register('b@x.com', 'bobby', 'password1');
     s.recordGame(g('r1', a, b, 'w')); expect(s.recordGame(g('r1', a, b, 'w'))).toBeNull();
-    expect(s.rating(a, 'chess')).toBe(1220);
-    s.recordGame(g('r2', a, b, 'b', { moves: ['e4'] })); expect(s.rating(a, 'chess')).toBe(1220);
-    expect(() => s.recordGame(g('self', a, a, 'w'))).not.toThrow(); expect(s.rating(a, 'chess')).toBe(1220);
+    expect(s.rating(a, 'chess', 'blitz')).toBe(1220);
+    s.recordGame(g('r2', a, b, 'b', { moves: ['e4'] })); expect(s.rating(a, 'chess', 'blitz')).toBe(1220);
+    expect(() => s.recordGame(g('self', a, a, 'w'))).not.toThrow(); expect(s.rating(a, 'chess', 'blitz')).toBe(1220);
   });
   it('elo is zero-sum for equal K and draws between equals do nothing', () => {
     expect(eloDelta(1200, 1200, 0.5, 0)).toBe(0);
@@ -63,10 +63,10 @@ describe('ratings', () => {
   it('leaderboard ranks, paginates and reports own position', () => {
     const { s } = mk(); const ids = ['aa', 'bb', 'cc'].map((n) => s.register(n + '@x.com', n + 'user', 'password1'));
     s.recordGame(g('1', ids[0], ids[1], 'w')); s.recordGame(g('2', ids[0], ids[2], 'w', { moves: ['a', 'b', 'c'] }));
-    const lb = s.leaderboard('chess', 0, 2, ids[1]);
+    const lb = s.leaderboard('chess', 'blitz', 0, 2, ids[1]);
     expect(lb.rows).toHaveLength(2); expect(lb.rows[0].name).toBe('aauser'); expect(lb.total).toBe(3);
     expect(lb.mine?.rank).toBeGreaterThan(1);
-    expect(s.leaderboard('gomoku', 0, 10).rows).toEqual([]);
+    expect(s.leaderboard('gomoku', 'std', 0, 10).rows).toEqual([]);
   });
 });
 
@@ -103,10 +103,10 @@ describe('seasons', () => {
     s.recordGame(g('f1', a, b, 'w'));
     fails(() => s.claimSeasonReward(a, 's1', 'top3'), 400);
     set(Date.parse('2027-01-02T00:00:00Z')); s.finalizeSeasons(); s.finalizeSeasons();
-    expect(s.db.prepare('SELECT COUNT(*) c FROM season_results WHERE game=\'chess\'').get()).toMatchObject({ c: 2 });
+    expect(s.db.prepare('SELECT COUNT(*) c FROM season_results WHERE game=\'chess/blitz\'').get()).toMatchObject({ c: 2 });
     s.claimSeasonReward(a, 's1', 'top3'); expect(s.inventory(a)).toContain('frame-s1-top');
     s.recordGame(g('later', b, a, 'w')); // ratings move on, snapshot stays
-    expect(s.db.prepare('SELECT rating FROM season_results WHERE game=\'chess\' AND rank=1').get()).toMatchObject({ rating: 1220 });
+    expect(s.db.prepare('SELECT rating FROM season_results WHERE game=\'chess/blitz\' AND rank=1').get()).toMatchObject({ rating: 1220 });
   });
 });
 

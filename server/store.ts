@@ -3,6 +3,9 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypt
 import { DEFAULTS, ITEM_BY_ID, FREE_ITEMS, type Slot } from '../src/catalog';
 import { SEASONS, CLAIM_GRACE_MS, type Season } from '../src/seasons';
 import type { GameKind } from '../src/protocol';
+import { migrate } from './migrate';
+import { ratingCat } from '../src/ratingConfig';
+import { TIME_CONTROLS } from '../src/games/chess';
 
 export const START_RATING = 1200;
 const SESSION_MS = 30 * 86400_000;
@@ -12,8 +15,9 @@ export class ApiError extends Error { constructor(public status: number, msg: st
 
 export interface GameSummary {
   id: string; game: GameKind; whiteId: number | null; blackId: number | null; whiteName: string; blackName: string;
-  rated: boolean; time: string; result: 'w' | 'b' | 'draw'; reason: string; moves: string[];
+  rated: boolean; time: string; result: 'w' | 'b' | 'draw'; reason: string; moves: string[]; tid?: number | null;
 }
+export const catOf = (game: GameKind, time: string) => { const t = TIME_CONTROLS.find((x) => x.id === time) ?? TIME_CONTROLS[0]; return ratingCat(game, t.baseSec, t.incSec); };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const NAME_RE = /^[A-Za-z0-9가-힣_]{2,16}$/;
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/;
@@ -27,7 +31,7 @@ type Row = Record<string, any>;
 
 export class Store {
   db: DatabaseSync;
-  constructor(path = ':memory:', private now: () => number = Date.now) {
+  constructor(path = ':memory:', public now: () => number = Date.now) {
     this.db = new DatabaseSync(path);
     this.db.exec(`
       PRAGMA foreign_keys=ON;
@@ -47,11 +51,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS season_claims(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, season TEXT NOT NULL, reward TEXT NOT NULL, PRIMARY KEY(user_id,season,reward));
       CREATE TABLE IF NOT EXISTS season_results(season TEXT NOT NULL, game TEXT NOT NULL, rank INTEGER NOT NULL, user_id INTEGER, rating INTEGER NOT NULL, PRIMARY KEY(season,game,rank));
     `);
+    migrate(this.db);
   }
-  private get(sql: string, ...p: any[]): Row | undefined { return this.db.prepare(sql).get(...p) as Row | undefined; }
-  private all(sql: string, ...p: any[]): Row[] { return this.db.prepare(sql).all(...p) as Row[]; }
-  private run(sql: string, ...p: any[]) { return this.db.prepare(sql).run(...p); }
-  private tx<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const r = fn(); this.db.exec('COMMIT'); return r; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
+  get(sql: string, ...p: any[]): Row | undefined { return this.db.prepare(sql).get(...p) as Row | undefined; }
+  all(sql: string, ...p: any[]): Row[] { return this.db.prepare(sql).all(...p) as Row[]; }
+  run(sql: string, ...p: any[]) { return this.db.prepare(sql).run(...p); }
+  tx<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const r = fn(); this.db.exec('COMMIT'); return r; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
 
   // ---- accounts ----
   register(email: string, name: string, password: string): number {
@@ -104,8 +109,8 @@ export class Store {
   setPublic(id: number, v: boolean) { this.run('UPDATE users SET is_public=? WHERE id=?', v ? 1 : 0, id); }
 
   // ---- ratings & games ----
-  rating(id: number, game: GameKind) { return (this.get('SELECT rating FROM ratings WHERE user_id=? AND game=?', id, game)?.rating as number) ?? START_RATING; }
-  ratings(id: number) { return this.all('SELECT game,rating,games FROM ratings WHERE user_id=?', id); }
+  rating(id: number, game: GameKind, cat: string = game === 'gomoku' ? 'std' : 'rapid') { return (this.get('SELECT rating FROM ratings WHERE user_id=? AND game=? AND cat=?', id, game, cat)?.rating as number) ?? START_RATING; }
+  ratings(id: number) { return this.all('SELECT game,cat,rating,games FROM ratings WHERE user_id=?', id); }
 
   /** Idempotent: the same game id is only recorded (and rated/rewarded) once. */
   recordGame(g: GameSummary): { w: number; b: number } | null {
@@ -115,14 +120,16 @@ export class Store {
       const rated = g.rated && bothUsers && g.moves.length >= 2;
       let dw: number | null = null, db: number | null = null;
       if (rated) {
-        const cur = (id: number) => this.get('SELECT rating,games FROM ratings WHERE user_id=? AND game=?', id, g.game) ?? { rating: START_RATING, games: 0 };
+        const cat = catOf(g.game, g.time);
+        const cur = (id: number) => this.get('SELECT rating,games FROM ratings WHERE user_id=? AND game=? AND cat=?', id, g.game, cat) ?? { rating: START_RATING, games: 0 };
         const a = cur(g.whiteId!), b = cur(g.blackId!);
         const sw = g.result === 'w' ? 1 : g.result === 'draw' ? 0.5 : 0;
         dw = eloDelta(a.rating, b.rating, sw, a.games); db = eloDelta(b.rating, a.rating, 1 - sw, b.games);
-        const up = (id: number, r: Row, d: number) => this.run('INSERT INTO ratings VALUES(?,?,?,1) ON CONFLICT(user_id,game) DO UPDATE SET rating=?, games=games+1', id, g.game, r.rating + d, r.rating + d);
+        const up = (id: number, r: Row, d: number) => this.run('INSERT INTO ratings VALUES(?,?,?,?,1) ON CONFLICT(user_id,game,cat) DO UPDATE SET rating=?, games=games+1', id, g.game, cat, r.rating + d, r.rating + d);
         up(g.whiteId!, a, dw); up(g.blackId!, b, db);
       }
-      this.run('INSERT INTO games VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', g.id, g.game, g.whiteId, g.blackId, g.whiteName, g.blackName, rated ? 1 : 0, g.time, g.result, g.reason, JSON.stringify(g.moves), dw, db, this.now());
+      this.run('INSERT INTO games(id,game,white_id,black_id,white_name,black_name,rated,time,result,reason,moves,delta_w,delta_b,created,cat,tid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', g.id, g.game, g.whiteId, g.blackId, g.whiteName, g.blackName, rated ? 1 : 0, g.time, g.result, g.reason, JSON.stringify(g.moves), dw, db, this.now(), catOf(g.game, g.time), g.tid ?? null);
+      if (g.tid && bothUsers) this.tournamentResult(g);
       if (bothUsers && g.moves.length >= MIN_REWARD_PLIES) {
         const day = new Date(this.now()).toISOString().slice(0, 10);
         for (const [uid, side] of [[g.whiteId!, 'w'], [g.blackId!, 'b']] as const) {
@@ -135,8 +142,14 @@ export class Store {
       return dw === null ? { w: 0, b: 0 } : { w: dw, b: db! };
     });
   }
+  tournamentResult(g: GameSummary) {
+    for (const [uid, side] of [[g.whiteId!, 'w'], [g.blackId!, 'b']] as const) {
+      const pts = g.result === 'draw' ? 1 : g.result === side ? 2 : 0;
+      this.run('UPDATE tournament_players SET points=points+?, played=played+1, wins=wins+? WHERE tid=? AND user_id=?', pts, g.result === side ? 1 : 0, g.tid, uid);
+    }
+  }
   gamesOf(id: number, limit = 30) {
-    return this.all('SELECT id,game,white_name,black_name,white_id,black_id,rated,time,result,reason,delta_w,delta_b,created FROM games WHERE white_id=? OR black_id=? ORDER BY created DESC LIMIT ?', id, id, Math.min(limit, 100));
+    return this.all('SELECT id,game,cat,white_name,black_name,white_id,black_id,rated,time,result,reason,delta_w,delta_b,created FROM games WHERE white_id=? OR black_id=? ORDER BY created DESC LIMIT ?', id, id, Math.min(limit, 100));
   }
   gameFor(userId: number, gameId: string) {
     const g = this.get('SELECT * FROM games WHERE id=?', gameId);
@@ -149,15 +162,15 @@ export class Store {
     for (const x of r) { (out[x.game] ??= { w: 0, l: 0, d: 0 })[x.o as 'w' | 'l' | 'd'] = x.c; }
     return out;
   }
-  leaderboard(game: GameKind, offset: number, limit: number, me?: number) {
+  leaderboard(game: GameKind, cat: string, offset: number, limit: number, me?: number) {
     offset = Math.max(0, offset | 0); limit = Math.min(50, Math.max(1, limit | 0));
-    const rows = this.all('SELECT u.name,r.rating,r.games,r.user_id FROM ratings r JOIN users u ON u.id=r.user_id WHERE r.game=? AND r.games>0 ORDER BY r.rating DESC, r.games DESC, u.id LIMIT ? OFFSET ?', game, limit, offset)
+    const rows = this.all('SELECT u.name,r.rating,r.games,r.user_id FROM ratings r JOIN users u ON u.id=r.user_id WHERE r.game=? AND r.cat=? AND r.games>0 ORDER BY r.rating DESC, r.games DESC, u.id LIMIT ? OFFSET ?', game, cat, limit, offset)
       .map((r, i) => ({ rank: offset + i + 1, name: r.name, rating: r.rating, games: r.games, me: r.user_id === me }));
-    const total = this.get('SELECT COUNT(*) c FROM ratings WHERE game=? AND games>0', game)!.c as number;
+    const total = this.get('SELECT COUNT(*) c FROM ratings WHERE game=? AND cat=? AND games>0', game, cat)!.c as number;
     let mine: { rank: number; rating: number; games: number } | null = null;
     if (me) {
-      const m = this.get('SELECT rating,games FROM ratings WHERE user_id=? AND game=? AND games>0', me, game);
-      if (m) mine = { rank: (this.get('SELECT COUNT(*) c FROM ratings WHERE game=? AND games>0 AND rating>?', game, m.rating)!.c as number) + 1, rating: m.rating, games: m.games };
+      const m = this.get('SELECT rating,games FROM ratings WHERE user_id=? AND game=? AND cat=? AND games>0', me, game, cat);
+      if (m) mine = { rank: (this.get('SELECT COUNT(*) c FROM ratings WHERE game=? AND cat=? AND games>0 AND rating>?', game, cat, m.rating)!.c as number) + 1, rating: m.rating, games: m.games };
     }
     return { rows, total, mine };
   }
@@ -213,9 +226,9 @@ export class Store {
     for (const s of SEASONS) {
       if (this.now() <= Date.parse(s.end) || this.get('SELECT 1 FROM season_results WHERE season=? LIMIT 1', s.id)) continue;
       this.tx(() => {
-        for (const game of ['chess', 'gomoku']) {
-          this.all('SELECT user_id,rating FROM ratings WHERE game=? AND games>0 ORDER BY rating DESC, games DESC, user_id LIMIT 10', game)
-            .forEach((r, i) => this.run('INSERT INTO season_results VALUES(?,?,?,?,?)', s.id, game, i + 1, r.user_id, r.rating));
+        for (const [game, cat] of [['chess', 'blitz'], ['chess', 'rapid'], ['chess', 'bullet'], ['chess', 'untimed'], ['gomoku', 'std']] as const) {
+          this.all('SELECT user_id,rating FROM ratings WHERE game=? AND cat=? AND games>0 ORDER BY rating DESC, games DESC, user_id LIMIT 10', game, cat)
+            .forEach((r, i) => this.run('INSERT INTO season_results VALUES(?,?,?,?,?)', s.id, `${game}/${cat}`, i + 1, r.user_id, r.rating));
         }
         this.run('INSERT OR IGNORE INTO season_results VALUES(?,?,?,?,?)', s.id, '_done', 0, null, 0);
       });
@@ -256,14 +269,73 @@ export class Store {
       blocked: n('SELECT u.id,u.name FROM blocks b JOIN users u ON u.id=b.blocked WHERE b.user_id=?'),
     };
   }
-  report(me: number, name: string, reason: string, gameId?: string) {
-    const t = this.userByName(name); reason = String(reason ?? '').trim().slice(0, 500);
+  report(me: number, name: string, reason: string, gameId?: string, context?: string, kind = 'user') {
+    const t = this.userByName(name); reason = Store.redact(String(reason ?? '').trim());
     if (!t || t.id === me) throw new ApiError(404, '사용자를 찾을 수 없습니다.');
     if (reason.length < 3) throw new ApiError(400, '신고 사유를 입력하세요.');
     const day = this.now() - 86400_000;
     if ((this.get('SELECT COUNT(*) c FROM reports WHERE reporter=? AND created>?', me, day)!.c as number) >= 10) throw new ApiError(429, '하루 신고 한도를 넘었습니다.');
-    this.run('INSERT INTO reports(reporter,target,reason,game_id,created) VALUES(?,?,?,?,?)', me, t.id, reason, gameId ? String(gameId).slice(0, 40) : null, this.now());
+    this.run('INSERT INTO reports(reporter,target,reason,game_id,created,kind,context) VALUES(?,?,?,?,?,?,?)', me, t.id, reason, gameId ? String(gameId).slice(0, 40) : null, this.now(), kind, context ? Store.redact(context, 2500) : null);
   }
+
+  // ---- email tokens, password reset ----
+  admins = new Set<string>();
+  userByEmail(email: string) { return this.get('SELECT id,email,name,email_verified FROM users WHERE email=?', String(email ?? '').trim().toLowerCase()); }
+  userRow(id: number) { return this.get('SELECT id,email,name,email_verified FROM users WHERE id=?', id); }
+  /** Admin = email listed in ADMIN_EMAILS AND verified (ownership proven by email link, or by the operator via scripts/verify-user.ts). */
+  isAdmin(id: number) { const u = this.userRow(id); return !!u && u.email_verified === 1 && this.admins.has(String(u.email)); }
+  /** Returns the raw token (only ever sent by email); only its SHA-256 is stored. Max 3 per hour per user and kind. */
+  createToken(userId: number, kind: 'verify' | 'reset', ttlMs: number): string {
+    const recent = this.get('SELECT COUNT(*) c FROM tokens WHERE user_id=? AND kind=? AND created>?', userId, kind, this.now() - 3600_000)!.c as number;
+    if (recent >= 3) throw new ApiError(429, '요청이 너무 많습니다. 잠시 후 다시 시도하세요.');
+    const raw = randomBytes(32).toString('base64url');
+    this.run('INSERT INTO tokens VALUES(?,?,?,?,0,?)', sha(raw), userId, kind, this.now() + ttlMs, this.now());
+    return raw;
+  }
+  /** One-time use: succeeds once, then the same token is rejected. */
+  consumeToken(raw: string, kind: 'verify' | 'reset'): number {
+    return this.tx(() => {
+      const r = this.get('SELECT user_id,expires,used FROM tokens WHERE hash=? AND kind=?', sha(String(raw ?? '')), kind);
+      if (!r || r.used || r.expires < this.now()) throw new ApiError(400, '링크가 만료되었거나 이미 사용되었습니다.');
+      this.run('UPDATE tokens SET used=1 WHERE hash=?', sha(String(raw)));
+      return r.user_id as number;
+    });
+  }
+  markVerified(id: number) { this.run('UPDATE users SET email_verified=1 WHERE id=?', id); }
+  deleteSessions(id: number) { this.run('DELETE FROM sessions WHERE user_id=?', id); }
+  setPassword(id: number, password: string) {
+    password = String(password ?? '');
+    if (password.length < 8 || password.length > 128) throw new ApiError(400, '비밀번호는 8자 이상이어야 합니다.');
+    const salt = randomBytes(16).toString('hex'), hash = scryptSync(password, salt, 64).toString('hex');
+    this.tx(() => { this.run('UPDATE users SET salt=?, hash=?, pw_changed=? WHERE id=?', salt, hash, this.now(), id); this.deleteSessions(id); this.run('UPDATE tokens SET used=1 WHERE user_id=? AND kind=\'reset\'', id); });
+  }
+  changePassword(id: number, oldPw: string, newPw: string) {
+    const u = this.get('SELECT salt,hash FROM users WHERE id=?', id)!;
+    if (!timingSafeEqual(scryptSync(String(oldPw ?? '').slice(0, 128), u.salt, 64), Buffer.from(u.hash, 'hex'))) throw new ApiError(401, '현재 비밀번호가 올바르지 않습니다.');
+    this.setPassword(id, newPw);
+  }
+  purgeExpired() { this.run('DELETE FROM tokens WHERE expires<?', this.now() - 86400_000); this.run('DELETE FROM sessions WHERE expires<?', this.now()); }
+
+  // ---- reports & admin audit ----
+  static redact(s: string, max = 500): string {
+    return String(s ?? '').replace(/(password|passwd|pw|비밀번호|token|토큰)\s*[:=]?\s*\S+/gi, '$1 [가림]').replace(/[A-Za-z0-9_-]{24,}/g, '[가림]').slice(0, max);
+  }
+  audit(adminId: number | null, action: string, target: string | null, detail?: string) { this.run('INSERT INTO audit_log(admin_id,action,target,detail,at) VALUES(?,?,?,?,?)', adminId, action, target, detail ? String(detail).slice(0, 300) : null, this.now()); }
+  auditLog(limit = 100) { return this.all('SELECT a.id,a.action,a.target,a.detail,a.at,u.name admin FROM audit_log a LEFT JOIN users u ON u.id=a.admin_id ORDER BY a.id DESC LIMIT ?', Math.min(limit, 200)); }
+  listReports(adminId: number, status?: string) {
+    const rows = this.all(`SELECT r.id,r.kind,r.reason,r.game_id,r.context,r.created,r.status,r.note,r.handled_at,rp.name reporter,tg.name target,h.name handled_by
+      FROM reports r LEFT JOIN users rp ON rp.id=r.reporter LEFT JOIN users tg ON tg.id=r.target LEFT JOIN users h ON h.id=r.handled_by
+      ${status ? 'WHERE r.status=?' : ''} ORDER BY r.created DESC LIMIT 200`, ...(status ? [status] : []));
+    this.audit(adminId, 'view_reports', status ?? 'all', `${rows.length} rows`);
+    return rows;
+  }
+  handleReport(adminId: number, id: number, status: string, note: string) {
+    if (!['open', 'reviewing', 'actioned', 'dismissed'].includes(status)) throw new ApiError(400, '알 수 없는 상태입니다.');
+    const r = this.get('SELECT id FROM reports WHERE id=?', id); if (!r) throw new ApiError(404, '신고를 찾을 수 없습니다.');
+    this.run('UPDATE reports SET status=?, note=?, handled_by=?, handled_at=? WHERE id=?', status, Store.redact(note), adminId, this.now(), id);
+    this.audit(adminId, 'handle_report', String(id), status);
+  }
+
   exportUser(id: number) {
     const u = this.get('SELECT id,email,name,created,coins,is_public FROM users WHERE id=?', id)!;
     return { user: u, ratings: this.ratings(id), games: this.all('SELECT * FROM games WHERE white_id=? OR black_id=?', id, id), inventory: this.inventory(id), equipped: this.equipped(id), friends: this.friends(id) };

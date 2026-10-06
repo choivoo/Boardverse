@@ -5,17 +5,23 @@ import { WebSocketServer } from 'ws';
 import { RoomManager, type Conn, type Hooks } from './rooms';
 import { Store, ApiError } from './store';
 import { ITEMS } from '../src/catalog';
+import { createMailer, type Mailer } from './mail';
+import * as T from './tournaments';
+import * as C from './clubs';
 import { SEASONS, seasonAt } from '../src/seasons';
 import type { ClientMsg, GameKind } from '../src/protocol';
+import { ACTIVE_CATS, CATS } from '../src/ratingConfig';
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
 const SEC = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" };
 const COOKIE = 'bv_session';
 
-export function makeHooks(store: Store): Hooks {
+export function makeHooks(store: Store, requireVerified = false): Hooks {
   return {
     blocked: (a, b) => store.isBlocked(a, b),
-    rating: (u, g) => store.rating(u, g),
+    canRate: (u) => !requireVerified || store.userRow(u)?.email_verified === 1,
+    tournament: (tid, u) => T.eligibility(store, tid, u),
+    rating: (u, g, c) => store.rating(u, g, c),
     isFriend: (a, b) => store.isFriend(a, b),
     userByName: (n) => { const u = store.userByName(n); return u ? { id: u.id } : undefined; },
     // Games between two guests are not stored at all (data minimisation).
@@ -26,10 +32,17 @@ export function makeHooks(store: Store): Hooks {
 const parseCookies = (h: string | undefined) => Object.fromEntries((h ?? '').split(';').map((c) => c.trim().split('=')).filter((p) => p.length === 2).map(([k, v]) => [k, decodeURIComponent(v)]));
 const isGame = (g: unknown): g is GameKind => g === 'chess' || g === 'gomoku';
 
-export interface App { server: http.Server; mgr: RoomManager; store: Store; tick(): void }
+export interface App { server: http.Server; mgr: RoomManager; store: Store; mailer: Mailer; tick(): void; close(): Promise<void> }
 
-export function createApp(store: Store, opts: { dist: string; now?: () => number }): App {
-  const mgr = new RoomManager(opts.now ?? Date.now, makeHooks(store));
+export function createApp(store: Store, opts: { dist: string; now?: () => number; mailer?: Mailer; env?: Record<string, string | undefined> }): App {
+  const env = opts.env ?? process.env;
+  const mailer = opts.mailer ?? createMailer(env);
+  store.admins = new Set((env.ADMIN_EMAILS ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+  const requireVerified = mailer.enabled && !mailer.dev; // real SMTP configured -> rated play needs a verified email
+  const mgr = new RoomManager(opts.now ?? Date.now, makeHooks(store, requireVerified));
+  const rate = new Map<string, number[]>();
+  const limit = (key: string, max: number, ms: number) => { const t = Date.now(); const a = (rate.get(key) ?? []).filter((x) => t - x < ms); if (a.length >= max) throw new ApiError(429, '요청이 너무 많습니다. 잠시 후 다시 시도하세요.'); a.push(t); rate.set(key, a); };
+  const publicBase = env.PUBLIC_URL ?? '';
   const loginFails = new Map<string, { n: number; until: number }>();
 
   const send = (res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) =>
@@ -42,7 +55,7 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
   const sameOrigin = (req: http.IncomingMessage) => { const o = req.headers.origin; if (!o) return true; try { return new URL(o).host === req.headers.host; } catch { return false; } };
 
   async function api(req: http.IncomingMessage, res: http.ServerResponse, url: URL) {
-    const secure = req.headers['x-forwarded-proto'] === 'https';
+    const secure = req.headers['x-forwarded-proto'] === 'https' || env.COOKIE_SECURE === '1';
     const token = parseCookies(req.headers.cookie)[COOKIE];
     const me = store.userBySession(token);
     const need = () => { if (!me) throw new ApiError(401, '로그인이 필요합니다.'); return me; };
@@ -58,6 +71,7 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
       try { id = path === '/api/register' ? store.register(body.email, body.name, body.password) : store.login(body.email, body.password); }
       catch (e) { const c = loginFails.get(ip) ?? { n: 0, until: 0 }; loginFails.set(ip, { n: c.n + 1, until: Date.now() + 10 * 60_000 }); throw e; }
       loginFails.delete(ip);
+      if (path === '/api/register' && mailer.enabled) void sendVerification(id).catch(() => {});
       const t = store.createSession(id);
       return send(res, 200, { ok: true }, { 'Set-Cookie': `${COOKIE}=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 86400}${secure ? '; Secure' : ''}` });
     }
@@ -68,7 +82,8 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
     if (path === '/api/me') {
       if (method === 'GET') {
         if (!me) return send(res, 200, { user: null });
-        return send(res, 200, { user: { id: me.id, name: me.name, coins: store.coins(me.id), public: !!store.userByName(me.name)!.is_public },
+        const row = store.userRow(me.id)!;
+        return send(res, 200, { user: { id: me.id, name: me.name, coins: store.coins(me.id), public: !!store.userByName(me.name)!.is_public, isAdmin: store.isAdmin(me.id), emailVerified: row.email_verified === 1, emailRequired: requireVerified },
           ratings: store.ratings(me.id), stats: store.stats(me.id), inventory: store.inventory(me.id), equipped: store.equipped(me.id) });
       }
       if (method === 'PATCH') { store.setPublic(need().id, !!body.public); return send(res, 200, { ok: true }); }
@@ -77,7 +92,9 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
     if (method === 'GET' && path === '/api/me/export') return send(res, 200, store.exportUser(need().id), { 'Content-Disposition': 'attachment; filename="boardverse-export.json"' });
     if (method === 'GET' && path === '/api/leaderboard') {
       const game = url.searchParams.get('game'); if (!isGame(game)) throw new ApiError(400, '게임을 선택하세요.');
-      return send(res, 200, store.leaderboard(game, Number(url.searchParams.get('offset') ?? 0) || 0, Number(url.searchParams.get('limit') ?? 20) || 20, me?.id));
+      const cat = url.searchParams.get('cat') ?? ACTIVE_CATS[game][0];
+      if (!CATS[game].includes(cat)) throw new ApiError(400, '알 수 없는 분류입니다.');
+      return send(res, 200, store.leaderboard(game, cat, Number(url.searchParams.get('offset') ?? 0) || 0, Number(url.searchParams.get('limit') ?? 20) || 20, me?.id));
     }
     if (method === 'POST' && path === '/api/shop/buy') { store.buy(need().id, String(body.item)); return send(res, 200, { coins: store.coins(me!.id) }); }
     if (method === 'POST' && path === '/api/shop/equip') { store.equip(need().id, String(body.item)); return send(res, 200, { equipped: store.equipped(me!.id) }); }
@@ -99,7 +116,7 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
     const social: Record<string, (id: number) => void> = {
       '/api/friends/request': (id) => store.friendRequest(id, body.name), '/api/friends/accept': (id) => store.acceptFriend(id, body.name),
       '/api/friends/remove': (id) => store.removeFriend(id, body.name), '/api/block': (id) => store.block(id, body.name),
-      '/api/unblock': (id) => store.unblock(id, body.name), '/api/report': (id) => store.report(id, body.name, body.reason, body.gameId),
+      '/api/unblock': (id) => store.unblock(id, body.name), '/api/report': (id) => store.report(id, body.name, body.reason, body.gameId, body.room ? mgr.chatContextFor(id, body.room) ?? undefined : undefined),
     };
     if (method === 'POST' && social[path]) { social[path](need().id); return send(res, 200, { ok: true }); }
     const um = path.match(/^\/api\/user\/([^/]{1,40})$/);
@@ -108,13 +125,98 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
       const mine = me?.id === u.id;
       return send(res, 200, { name: u.name, ratings: store.ratings(u.id), online: mgr.isOnline(u.id), games: u.is_public || mine ? store.gamesOf(u.id, 10).map((g) => ({ ...g, white_id: undefined, black_id: undefined })) : null });
     }
+
+    // ---- config, email verification, password reset ----
+    if (method === 'GET' && path === '/api/config') return send(res, 200, { email: mailer.enabled, emailDev: mailer.dev, emailRequiredForRated: requireVerified });
+    if (method === 'GET' && path === '/api/dev/outbox' && mailer.dev) return send(res, 200, { outbox: mailer.outbox });
+    if (method === 'POST' && path === '/api/email/send-verification') {
+      const u = need(); if (!mailer.enabled) throw new ApiError(503, '이 서버에는 이메일 발송이 설정되어 있지 않습니다.');
+      limit('ver:' + ip, 20, 3600_000);
+      if (store.userRow(u.id)!.email_verified === 1) throw new ApiError(409, '이미 인증된 이메일입니다.');
+      await sendVerification(u.id); return send(res, 200, { ok: true });
+    }
+    if (method === 'POST' && path === '/api/email/verify') { store.markVerified(store.consumeToken(body.token, 'verify')); return send(res, 200, { ok: true }); }
+    if (method === 'POST' && path === '/api/password/forgot') {
+      if (!mailer.enabled) throw new ApiError(503, '이 서버에는 이메일 발송이 설정되어 있지 않아 비밀번호 재설정을 사용할 수 없습니다.');
+      limit('forgot:' + ip, 10, 3600_000);
+      const u = store.userByEmail(body.email);
+      if (u) { try { const t = store.createToken(u.id as number, 'reset', 3600_000); void mailer.send(u.email as string, '[Boardverse] 비밀번호 재설정', `아래 링크에서 1시간 안에 비밀번호를 재설정하세요(한 번만 사용 가능).\n${publicBase}/?reset=${t}\n\n요청하지 않았다면 무시하세요.`).catch(() => {}); } catch { /* swallow: never reveal whether the address exists */ } }
+      return send(res, 200, { ok: true }); // identical response whether or not the address is registered
+    }
+    if (method === 'POST' && path === '/api/password/reset') {
+      limit('reset:' + ip, 20, 3600_000);
+      const pw = String(body.password ?? '');
+      if (pw.length < 8 || pw.length > 128) throw new ApiError(400, '비밀번호는 8자 이상이어야 합니다.'); // validate BEFORE burning the one-time token
+      const uid = store.consumeToken(body.token, 'reset'); store.setPassword(uid, pw);
+      return send(res, 200, { ok: true });
+    }
+    if (method === 'POST' && path === '/api/password/change') {
+      const u = need(); store.changePassword(u.id, body.old, body.password);
+      const t = store.createSession(u.id); // all other sessions were invalidated
+      return send(res, 200, { ok: true }, { 'Set-Cookie': `${COOKIE}=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 86400}${secure ? '; Secure' : ''}` });
+    }
+
+    // ---- admin: reports, audit, tournaments ----
+    const admin = () => { const u = need(); if (!store.isAdmin(u.id)) throw new ApiError(403, '관리자 권한이 필요합니다.'); return u; };
+    if (method === 'GET' && path === '/api/admin/reports') return send(res, 200, { reports: store.listReports(admin().id, url.searchParams.get('status') || undefined) });
+    const rh = path.match(/^\/api\/admin\/reports\/(\d+)$/);
+    if (method === 'POST' && rh) { store.handleReport(admin().id, Number(rh[1]), String(body.status), String(body.note ?? '')); return send(res, 200, { ok: true }); }
+    if (method === 'GET' && path === '/api/admin/audit') { admin(); return send(res, 200, { log: store.auditLog() }); }
+    if (method === 'POST' && path === '/api/admin/tournaments') return send(res, 200, { id: T.createTournament(store, admin().id, body) });
+
+    // ---- tournaments ----
+    if (method === 'GET' && path === '/api/tournaments') return send(res, 200, { tournaments: T.listTournaments(store, me?.id) });
+    const tm = path.match(/^\/api\/tournaments\/(\d+)(?:\/(join|leave))?$/);
+    if (tm) {
+      const tid = Number(tm[1]);
+      if (method === 'GET' && !tm[2]) return send(res, 200, T.standings(store, tid));
+      if (method === 'POST' && tm[2] === 'join') { const u = need(); if (requireVerified && store.userRow(u.id)!.email_verified !== 1) throw new ApiError(403, '이메일 인증 후 참가할 수 있습니다.'); T.joinTournament(store, u.id, tid); return send(res, 200, { ok: true }); }
+      if (method === 'POST' && tm[2] === 'leave') { T.leaveTournament(store, need().id, tid); return send(res, 200, { ok: true }); }
+    }
+
+    // ---- clubs ----
+    if (method === 'GET' && path === '/api/clubs') return send(res, 200, { clubs: C.searchClubs(store, url.searchParams.get('q') ?? '', me?.id) });
+    if (method === 'GET' && path === '/api/clubs/mine') return send(res, 200, { clubs: C.myClubList(store, need().id) });
+    if (method === 'POST' && path === '/api/clubs') { limit('club:' + need().id, 5, 3600_000); return send(res, 200, { id: C.createClub(store, me!.id, body.name, body.about, body.public !== false) }); }
+    const cm = path.match(/^\/api\/clubs\/(\d+)(?:\/([a-z]+))?$/);
+    if (cm) {
+      const cid = Number(cm[1]), act = cm[2];
+      if (method === 'GET' && !act) return send(res, 200, C.getClub(store, cid, me?.id));
+      const u = need();
+      const ok = () => send(res, 200, { ok: true });
+      if (method === 'POST') {
+        switch (act) {
+          case 'join': return send(res, 200, { status: C.joinClub(store, u.id, cid) });
+          case 'leave': C.leaveClub(store, u.id, cid); return ok();
+          case 'accept': C.decideRequest(store, u.id, cid, body.name, true); return ok();
+          case 'reject': C.decideRequest(store, u.id, cid, body.name, false); return ok();
+          case 'invite': C.inviteToClub(store, u.id, cid, body.name); return ok();
+          case 'answer': C.answerInvite(store, u.id, cid, !!body.accept); return ok();
+          case 'kick': C.kickMember(store, u.id, cid, body.name); return ok();
+          case 'role': C.setRole(store, u.id, cid, body.name, body.role); return ok();
+          case 'update': C.updateClub(store, u.id, cid, body); return ok();
+          case 'report': { const owner = C.clubOwner(store, cid); if (!owner) throw new ApiError(404, '클럽을 찾을 수 없습니다.'); store.report(u.id, owner, body.reason, undefined, `club:${cid}`, 'club'); return ok(); }
+        }
+      }
+      if (method === 'DELETE' && !act) { C.deleteClub(store, u.id, cid); return ok(); }
+    }
+
+    // ---- live games ----
+    if (method === 'GET' && path === '/api/live') return send(res, 200, { games: mgr.live() });
     throw new ApiError(404, '존재하지 않는 API입니다.');
+  }
+
+  async function sendVerification(userId: number) {
+    const u = store.userRow(userId)!;
+    const t = store.createToken(userId, 'verify', 24 * 3600_000);
+    await mailer.send(u.email as string, '[Boardverse] 이메일 인증', `아래 링크를 열어 이메일을 인증하세요(24시간, 한 번만 사용 가능).\n${publicBase}/?verify=${t}`);
   }
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
+    if (req.headers['x-forwarded-proto'] === 'https' || env.COOKIE_SECURE === '1') res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     try {
-      if (url.pathname === '/healthz') { res.writeHead(200, SEC).end('ok'); return; }
+      if (url.pathname === '/healthz') { try { store.get('SELECT 1'); res.writeHead(200, SEC).end('ok'); } catch { res.writeHead(503).end('db'); } return; }
       if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     } catch (e) {
       if (e instanceof ApiError) return send(res, e.status, { error: e.message });
@@ -147,5 +249,14 @@ export function createApp(store: Store, opts: { dist: string; now?: () => number
     ws.on('close', () => { clearInterval(reset); mgr.disconnect(conn); });
     ws.on('error', () => ws.close());
   });
-  return { server, mgr, store, tick() { mgr.tick(); store.finalizeSeasons(); } };
+  return {
+    server, mgr, store, mailer,
+    tick() { mgr.tick(); store.finalizeSeasons(); T.finalizeTournaments(store); },
+    async close() {
+      for (const c of wss.clients) c.close(1001, 'server shutting down');
+      wss.close();
+      await new Promise<void>((r) => server.close(() => r()));
+      store.db.close();
+    },
+  };
 }

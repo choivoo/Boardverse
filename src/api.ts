@@ -11,17 +11,19 @@ export async function api<T = any>(path: string, method = 'GET', body?: unknown)
 }
 
 export interface Me {
-  id: number; name: string; coins: number; public: boolean;
+  id: number; name: string; coins: number; public: boolean; isAdmin: boolean; emailVerified: boolean; emailRequired: boolean;
 }
+export interface Config { email: boolean; emailDev: boolean; emailRequiredForRated: boolean }
 export interface AccountState {
   status: 'loading' | 'guest' | 'user' | 'offline';
-  user: Me | null; ratings: { game: string; rating: number; games: number }[]; stats: Record<string, { w: number; l: number; d: number }>;
+  user: Me | null; ratings: { game: string; cat: string; rating: number; games: number }[]; stats: Record<string, { w: number; l: number; d: number }>;
   inventory: string[]; equipped: Record<string, string>;
 }
 interface Ctx extends AccountState {
   refresh(): Promise<void>; login(email: string, password: string): Promise<void>; register(email: string, name: string, password: string): Promise<void>; logout(): Promise<void>;
   preview: Partial<Record<Slot, string>>; setPreview(p: Partial<Record<Slot, string>>): void;
   look: Record<Slot, string>;
+  config: Config | null;
 }
 const empty: AccountState = { status: 'loading', user: null, ratings: [], stats: {}, inventory: [], equipped: {} };
 const AccountCtx = createContext<Ctx | null>(null);
@@ -29,6 +31,8 @@ const AccountCtx = createContext<Ctx | null>(null);
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [s, setS] = useState<AccountState>(empty);
   const [preview, setPreview] = useState<Partial<Record<Slot, string>>>({});
+  const [config, setConfig] = useState<Config | null>(null);
+  useEffect(() => { api<Config>('/api/config').then(setConfig).catch(() => setConfig(null)); }, []);
   const refresh = useCallback(async () => {
     try {
       const r = await api<{ user: Me | null } & Partial<AccountState>>('/api/me');
@@ -44,7 +48,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     const d = document.documentElement.dataset;
     d.board = look.boardTheme; d.pieces = look.chessSet; d.stones = look.stoneSet;
   }, [look]);
-  const value = useMemo(() => ({ ...s, refresh, login, register, logout, preview, setPreview, look }), [s, refresh, login, register, logout, preview, look]);
+  const value = useMemo(() => ({ ...s, refresh, login, register, logout, preview, setPreview, look, config }), [s, refresh, login, register, logout, preview, look, config]);
   return createElement(AccountCtx.Provider, { value }, children);
 }
 export function useAccount(): Ctx { const c = useContext(AccountCtx); if (!c) throw new Error('AccountProvider missing'); return c; }

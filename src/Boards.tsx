@@ -46,8 +46,8 @@ export function ChessBoard({ game, flip, sel, targets, last, onSquare, hint }: {
 const coarse = () => { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } };
 
 /** Gomoku board. In "confirm" mode (default on touch screens) a tap previews the stone and a second tap/button confirms. */
-export function GomokuBoard({ size, board, lastIdx, winLine, disabled, onPlace, hint }: {
-  hint?: number;
+export function GomokuBoard({ size, board, lastIdx, winLine, disabled, onPlace, hint, readOnly }: {
+  hint?: number; readOnly?: boolean;
   size: number; board: GomokuState['board']; lastIdx?: number; winLine: number[]; disabled: boolean; onPlace: (i: number) => void;
 }) {
   const [confirm, setConfirm] = useState(coarse);
@@ -72,10 +72,10 @@ export function GomokuBoard({ size, board, lastIdx, winLine, disabled, onPlace, 
           );
         })}
       </div>
-      <div className="confirmbar">
+      {!readOnly && <div className="confirmbar">
         <label><input type="checkbox" checked={confirm} onChange={(e) => { setConfirm(e.target.checked); setPending(null); }} /> 신중 착수 (탭 후 확정)</label>
         {confirm && <button className="primary" disabled={pend === null} onClick={() => { if (pend !== null) { setPending(null); onPlace(pend); } }}>착수</button>}
-      </div>
+      </div>}
     </>
   );
 }

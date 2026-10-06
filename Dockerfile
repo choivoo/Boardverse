@@ -9,4 +9,4 @@ ENV NODE_ENV=production PORT=8787 DATABASE_PATH=/data/boardverse.db NODE_NO_WARN
 VOLUME /data
 EXPOSE 8787
 HEALTHCHECK CMD node -e "fetch('http://localhost:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["npm","start"]
+CMD ["node","--import","tsx","server/index.ts"]

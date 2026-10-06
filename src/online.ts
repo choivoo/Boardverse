@@ -9,7 +9,7 @@ const write = (s: Sess | null) => { try { s ? sessionStorage.setItem(KEY, JSON.s
 export type Conn = 'connecting' | 'open' | 'closed';
 export interface Invite { from: string; code: string }
 interface OnlineCtx {
-  view: RoomView | null; conn: Conn; error: string | null; info: string | null; at: number; queued: boolean; invites: Invite[];
+  view: RoomView | null; chat: { name: string; side: 'w' | 'b'; text: string; at: number }[]; conn: Conn; error: string | null; info: string | null; at: number; queued: boolean; invites: Invite[];
   send(m: ClientMsg): void; leave(): void; setError(e: string | null): void; dismissInvite(code: string): void;
 }
 const Ctx = createContext<OnlineCtx | null>(null);
@@ -21,6 +21,7 @@ export function OnlineProvider({ enabled, identity, children }: { enabled: boole
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [queued, setQueued] = useState(false);
+  const [chat, setChat] = useState<{ name: string; side: 'w' | 'b'; text: string; at: number }[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
   const [at, setAt] = useState(Date.now());
   const ws = useRef<WebSocket | null>(null);
@@ -36,8 +37,9 @@ export function OnlineProvider({ enabled, identity, children }: { enabled: boole
       s.onopen = () => { retry = 0; setConn('open'); if (sess.current) s.send(JSON.stringify({ t: 'resume', ...sess.current })); };
       s.onmessage = (ev) => {
         let m: ServerMsg; try { m = JSON.parse(ev.data); } catch { return; }
-        if (m.t === 'joined') { sess.current = { code: m.view.code, token: m.token }; write(sess.current); setView(m.view); setAt(Date.now()); setError(null); setQueued(false); }
+        if (m.t === 'joined') { setChat(m.view.chat ?? []); sess.current = { code: m.view.code, token: m.token }; write(sess.current); setView(m.view); setAt(Date.now()); setError(null); setQueued(false); }
         else if (m.t === 'view') { setView(m.view); setAt(Date.now()); }
+        else if (m.t === 'chat') setChat((l) => [...l, { name: m.name, side: m.side, text: m.text, at: m.at }].slice(-50));
         else if (m.t === 'queued') setQueued(true);
         else if (m.t === 'unqueued') setQueued(false);
         else if (m.t === 'invited') setInvites((l) => [...l.filter((i) => i.code !== m.code), { from: m.from, code: m.code }].slice(-3));
@@ -56,7 +58,7 @@ export function OnlineProvider({ enabled, identity, children }: { enabled: boole
   }, []);
   const leave = useCallback(() => { sess.current = null; write(null); setView(null); }, []);
   const dismissInvite = useCallback((code: string) => setInvites((l) => l.filter((i) => i.code !== code)), []);
-  const value = useMemo(() => ({ view, conn, error, info, at, queued, invites, send, leave, setError, dismissInvite }), [view, conn, error, info, at, queued, invites, send, leave, dismissInvite]);
+  const value = useMemo(() => ({ view, chat, conn, error, info, at, queued, invites, send, leave, setError, dismissInvite }), [view, chat, conn, error, info, at, queued, invites, send, leave, dismissInvite]);
   return createElement(Ctx.Provider, { value }, children);
 }
 export function useOnline(): OnlineCtx { const c = useContext(Ctx); if (!c) throw new Error('OnlineProvider missing'); return c; }

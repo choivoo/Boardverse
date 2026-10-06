@@ -109,3 +109,7 @@ textarea{width:100%;min-height:120px;font:14px ui-monospace,monospace;border-rad
 .brand img{display:block}
 .pt.hint-sq{outline:4px solid var(--ok);outline-offset:-4px}
 .top nav button{white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis}.nm{display:inline-block;max-width:52vw;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+.chatbox{border:1px solid var(--line);border-radius:12px;padding:.5rem;background:var(--card)}.chatlist{list-style:none;margin:0 0 .5rem;padding:0;max-height:140px;overflow:auto;font-size:.9rem}.chatlist li{margin:.15rem 0;overflow-wrap:anywhere}
+/* header must never push the page wider than the screen (long nicknames) */
+.top{gap:.5rem}.top nav{min-width:0;flex:0 1 auto}.top nav button{max-width:100%;min-width:0}.nm{max-width:min(42vw,200px)}.brand{flex:0 0 auto}
+html,body{overflow-x:clip}

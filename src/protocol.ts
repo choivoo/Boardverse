@@ -2,8 +2,11 @@ export type Side = 'w' | 'b';
 export type GameKind = 'chess' | 'gomoku';
 
 export type ClientMsg =
-  | { t: 'create'; game: GameKind; name: string; side: Side | 'random'; time?: string; size?: number; rated?: boolean }
-  | { t: 'queue'; game: GameKind; name: string; time?: string; size?: number; rated?: boolean }
+  | { t: 'create'; game: GameKind; name: string; side: Side | 'random'; time?: string; size?: number; rated?: boolean; spectate?: boolean }
+  | { t: 'queue'; game: GameKind; name: string; time?: string; size?: number; rated?: boolean; spectate?: boolean; tournament?: number }
+  | { t: 'watch'; code: string }
+  | { t: 'unwatch' }
+  | { t: 'chat'; text: string }
   | { t: 'unqueue' }
   | { t: 'draw'; action: 'offer' | 'accept' | 'decline' }
   | { t: 'rematch' }
@@ -22,6 +25,12 @@ export interface RoomView {
   /** side that currently offers a draw, if any */
   drawOffer: Side | null;
   rematch: Side[];
+  spectators: number;
+  spectate: boolean;
+  /** true when this view is for a read-only spectator (you is meaningless then) */
+  spectator?: boolean;
+  tournament?: number;
+  chat?: { name: string; side: Side; text: string; at: number }[];
   players: { name: string; side: Side; connected: boolean; registered: boolean }[];
   you: Side;
   /** number of moves played; clients echo it back to reject stale submissions */
@@ -35,6 +44,7 @@ export interface RoomView {
 export type ServerMsg =
   | { t: 'joined'; token: string; view: RoomView }
   | { t: 'view'; view: RoomView }
+  | { t: 'chat'; name: string; side: Side; text: string; at: number }
   | { t: 'queued' }
   | { t: 'unqueued' }
   | { t: 'invited'; from: string; code: string }
